@@ -33,7 +33,7 @@ Resolve `<skill-dir>` as the directory containing this `SKILL.md` (`skills/codex
    - If `installed: false`, run `<bridge> hooks install --worker codex` once from a writable context, then re-verify `hooks status --worker codex`.
 2. Check Runtime liveness:
    - `<bridge> server status`
-   - If stopped, run `<bridge> server start`, then confirm `server status` succeeds.
+   - If stopped, run `<bridge> server start`, then confirm `server status` succeeds. (If the host's process container/Job Object terminates detached processes started by `server start` between tool calls, run `<bridge> server run` as a persistent background daemon task instead.)
    - Run `<bridge> doctor --worker codex` only if Codex CLI availability or hook trust is uncertain.
 
 ### Stage 2: AGY Plans & Dispatches Bounded Contract

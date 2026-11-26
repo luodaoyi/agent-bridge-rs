@@ -392,6 +392,8 @@ pub(crate) fn blocked_reason(worker: WorkerKind, screen: &str) -> Option<&'stati
             if screen.contains("Trust this directory")
                 || screen.contains("Do you trust the contents of this directory?")
                 || screen.contains("trust the files in this folder")
+                || screen.contains("Trust this folder?")
+                || screen.contains("Trust and continue")
             {
                 Some("codex-trust-directory")
             } else if screen.contains("trust these hooks")
@@ -756,6 +758,15 @@ mod tests {
                 "never",
                 "hello <world> & test"
             ]
+        );
+    }
+
+    #[test]
+    fn detects_codex_0172_folder_access_trust_prompt() {
+        let screen = "\n  Folder access\n  D:\\sources\\repos-new\\gh\\agent-bridge-rs\\.worktrees\\refactor-session-split\n\n  Trust this folder? Codex can read, edit, and run files here, subject to your permission settings.\n\n› 1. Trust and continue\n  2. Back to Agent Command Center\n\n  enter continue · esc back\n";
+        assert_eq!(
+            blocked_reason(WorkerKind::Codex, screen),
+            Some("codex-trust-directory")
         );
     }
 }
