@@ -1,0 +1,28 @@
+name: Feature request
+description: Propose a bounded enhancement within agent-bridge-rs's local runtime scope
+labels: [enhancement]
+body:
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Target subsystem
+      options:
+        - protocol-and-transport
+        - worker-and-pty
+        - hooks-and-installer
+        - server-and-webui
+        - loop-and-release
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior & acceptance criteria
+    validations:
+      required: true

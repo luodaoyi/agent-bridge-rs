@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a bug in agent-bridge-rs (CLI, daemon, PTY, hooks, WebUI, or installer)
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: agent-bridge version
+      description: Run `agent-bridge --version` or check the WebUI footer.
+      placeholder: 0.9.0
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Host -> Worker / Surface
+      options:
+        - AGY -> Codex
+        - AGY -> Grok
+        - Codex -> Grok
+        - Installer / Hooks
+        - WebUI / Terminal GUI
+        - CLI / Daemon IPC
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS & Architecture
+      placeholder: Windows 11 x64 / Ubuntu 24.04 / macOS 15 arm64
+    validations:
+      required: true
+  - type: input
+    id: worker_cli
+    attributes:
+      label: Worker CLI & version
+      placeholder: codex-cli 0.172.0 (pnpm) / grok 1.0.92
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `agent-bridge ...`
+        2.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What happened vs expected
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Raw screen / terminal output or JSON error
+      description: Paste exact stderr, JSON response, or terminal screen (remove any keys/tokens first).
+      render: text
