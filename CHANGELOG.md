@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.9.0 - 2026-11-26
+
+- Refactored `grok-bridge-rs` into `agent-bridge-rs`, supporting a bounded 2×2 local runtime matrix: `Codex -> Grok`, `AGY -> Codex`, and `AGY -> Grok` with binary `agent-bridge`, IPC identity `agent-bridge-runtime-v1-*`, and WebUI port `127.0.0.1:47654`.
+- Added dual-host lease isolation (`CODEX_THREAD_ID`/`CODEX_SESSION_ID` and `ANTIGRAVITY_CONVERSATION_ID`/`ANTIGRAVITY_TRAJECTORY_ID`) and stripped parent host env vars from child worker processes.
+- Added `--worker grok|codex`, `--sandbox`, and `--dangerously-bypass` CLI/RPC flags, plus `close-client` (keeping `close-codex` alias) and dual-worker `doctor`.
+- Added non-destructive Codex `~/.codex/hooks.json` merge/uninstall (preserving foreign hooks such as `rtk hook codex`), Grok `~/.grok/hooks/agent-bridge.json`, and manual-deletion reminder for legacy `grok-bridge.json`.
+- Updated `install`/`uninstall` to deploy both the Codex Skill (`~/.agents/skills/agent-bridge/`) and AGY Native Plugin (`~/.gemini/config/plugins/agent-bridge/`), and updated WebUI/i18n with AGY/Codex host and worker badges.
+- Resolved Windows `PATH` and npm/pnpm `.cmd` node shims directly in `worker.rs`, released ConPTY master on fast natural child exit, and renamed npm distribution packages to `agent-bridge-rs` and `@asural/agent-bridge`.
+
 ## 0.8.11 - 2026-08-21
 
 - Windows session spawn now starts the PTY writer/reader before the Grok PID handshake so ConPTY inherit-cursor `CSI 6n` is answered and the launcher can report its process ID. Handshake errors include bounded pre-handshake PTY output, terminate the Job Object, and drop the PTY master so a failed `create` cannot leak the helper tree.

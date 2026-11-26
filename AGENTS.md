@@ -1,35 +1,58 @@
-# Repository Guidelines
+# AGENTS.md
 
-## 项目结构与定位
+> 本仓库所有 AI Agent（Antigravity / Codex / Claude Code / Grok）的**唯一权威入口**。动手前先读完本页与 [LESSONS.md](LESSONS.md)。
 
-本仓库构建跨平台 `agent-bridge`（支持 **Codex → Grok**、**AGY → Codex**、**AGY → Grok** 有界 2×2 矩阵的本地 Runtime）。`src/main.rs` 提供 CLI；`transport.rs` 负责自动启动、双宿主（Codex / Antigravity）身份探测和本地 IPC；`server.rs` 分发 RPC 与 WebUI；`session.rs` 持有 Worker PTY、有界终端状态与 Windows Job Object / Unix 进程组治理；`worker.rs` 封装 Grok 与 Codex 命令构建、阻塞提示与标题状态启发式；`hooks.rs` 管理 Grok 独立 Hook 文件与 Codex `hooks.json` 无损合并；`protocol.rs` 定义 JSON 请求和响应；`terminal_gui.rs` 实现 egui 真实终端；`gui_fonts.rs` 发现并验证 CJK fallback 字体；`install.rs` 部署 Codex Skill（`SKILL.md`）与 AGY 原生 Plugin（`plugin.json` + `skills/{codex,grok}-worker/SKILL.md`）。
+## 项目定位与边界
 
-保持 Orca 风格本地 Runtime，不扩展为网络服务、数据库、Git/worktree 管理器或开放式多 provider 抽象。
+`agent-bridge-rs` 是本地优先的交互式 Subagent Runtime（CLI `agent-bridge`，默认 WebUI `127.0.0.1:47654`，IPC `agent-bridge-runtime-v1-*`），服务有界 2×2 调度矩阵：
 
-## 开发与编码规则
+- **Codex → Grok**
+- **Antigravity (AGY) → Codex**
+- **Antigravity (AGY) → Grok**
 
-- 保持每用户单例 Server；CLI 通过本地 Named Pipe / Unix Socket（`agent-bridge-runtime-v1-*`）调用 `create/list/show/read/send/write/resize/wait/close`，默认 WebUI 端口 `127.0.0.1:47654`。
-- `create` 与创建态 `terminal` 必须显式传 `--worker grok|codex`；Codex `--always-approve` 默认映射 `-s workspace-write -a never`，无沙箱直通需显式 `--dangerously-bypass`。
-- 所有 Worker 进程和 ConPTY 均由 Server 创建并持有，且启动前必须剥离父宿主环境变量避免嵌套串租约。egui terminal 只附着会话，关窗口只 detach，显式 `close` 才终止会话。
-- `send --text` 保持括号粘贴并追加 Enter 的高层语义；`write --data-base64` 必须逐字节写入，禁止隐式转码、追加回车或修改控制序列。
-- `resize` 必须同时更新 ConPTY 和服务端 vt100 屏幕。`show` 保持 `rows`、`cols`、`screen_ansi_base64`，供 GUI 恢复当前状态。
-- Named Pipe 使用一请求一响应 NDJSON，单帧保持 1 MiB 上限；保留 raw write 大小、终端行列、cursor 和参数验证。
-- 启动外部程序必须使用独立参数，禁止 shell 拼接。`cwd` 必须 canonicalize，并保留 `AGENT_BRIDGE_ALLOWED_ROOTS`。
-- GUI reader 和 writer 不得阻塞 egui 线程；后台结果到达后调用 `request_repaint`。窗口销毁只停止本地 reader，不发送 Close。
-- cell renderer 必须保留颜色、样式、宽字符、光标、selection、copy 和 scrollback；输入需覆盖 IME、粘贴、控制键、Alt、导航键和 resize。
-- Windows 英文必须优先使用 Consolas，中文必须由验证过字形覆盖的微软雅黑 fallback 显示；保留 `AGENT_BRIDGE_CJK_FONT`、`AGENT_BRIDGE_CJK_FONT_INDEX` 的显式中文字体覆盖和跨平台候选发现。
-- Rust 使用 Rustfmt 默认风格：函数 `snake_case`、类型 `PascalCase`、常量 `SCREAMING_SNAKE_CASE`。
+保持 Magpie/Orca 风格轻量本地守护进程：**不扩展为网络服务、数据库、Git/Worktree 管理器或开放式多 Provider 抽象**。
 
-## 构建与测试
+## 文档与避坑地图
 
-默认测试不得调用真实 Grok/Codex、消耗额度或修改外部仓库。变更 WebUI 后须先执行 `cd webui && npm ci && npm test && npm run build` 生成内嵌产物，再运行：
+修改任何模块前，先阅读 [编码规范与提交纪律](docs/code-standards.md)、[最近踩坑教训](LESSONS.md) 与对应的子系统参考卡：
 
-```text
-cargo fmt --check
-cargo test --all-targets
-cargo clippy --all-targets --all-features -- -D warnings
-cargo build --release
-node test/launcher.test.js
+| 子系统 | 说明文档 | 对应核心代码 |
+| --- | --- | --- |
+| 总索引与文档契约 | [docs/subsystems/README.md](docs/subsystems/README.md) | 跨模块联动规则与 PR 语义说明 |
+| 协议与宿主租约 | [protocol-and-transport.md](docs/subsystems/protocol-and-transport.md) | [src/protocol.rs](src/protocol.rs)、[src/transport.rs](src/transport.rs) |
+| 执行器与 PTY 生命周期 | [worker-and-pty.md](docs/subsystems/worker-and-pty.md) | [src/worker.rs](src/worker.rs)、[src/session.rs](src/session.rs) |
+| Hooks 与双宿主安装器 | [hooks-and-installer.md](docs/subsystems/hooks-and-installer.md) | [src/hooks.rs](src/hooks.rs)、[src/install.rs](src/install.rs)、[skills/](skills/) |
+| Server、WebUI 与桌面终端 | [server-and-webui.md](docs/subsystems/server-and-webui.md) | [src/server.rs](src/server.rs)、[src/terminal_gui.rs](src/terminal_gui.rs)、[webui/](webui/) |
+| Issue Loop 与发版流水线 | [loop-and-release.md](docs/subsystems/loop-and-release.md) | [scripts/](scripts/)、[.github/workflows/](.github/workflows/) |
+
+## 必跑质量门禁（提交前全量执行）
+
+改动 `webui/` 时先跑前端构建（内嵌静态资源供 `src/server.rs` `include_bytes!` 编译）：
+
+```sh
+cd webui && npm ci && npm test && npm run build
 ```
 
-不要自动 commit、push、创建 Tag 或发布 Release。
+每次代码或文档提交前必跑全量检查（禁止只跑单个测试子集后宣称通过）：
+
+```sh
+cargo fmt --check
+cargo test --all-targets --locked
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo build --locked
+node test/launcher.test.js
+node scripts/check-governance.mjs
+node --test test/governance.test.js
+```
+
+若启用了 `CARGO_TARGET_DIR`，先用对应 target 下的二进制运行 `node test/launcher.test.js`（可通过 `AGENT_BRIDGE_TEST_BINARY` 指定）。默认自动化测试不得调用真实 `grok`/`codex` CLI、消耗额度或修改用户真实目录（`~/.codex/`、`~/.grok/`、`~/.agents/`、`~/.gemini/`）。
+
+## 轻量协作与安全红线
+
+1. **轻量 3 角色边界**：
+   - **Maintainer（人）**：打 `ready` 标签准入 Issue、PR 合并终审、发版拍板。
+   - **Implementer（本地 Worker / `magpie-loop`）**：在独占 `.worktrees/issue-<N>` 内先写失败复现测试，再做最小修复，跑通全量门禁后提 PR（禁止直接推 `main`、禁止 force-push、禁止自审自合）。
+   - **CI & Review（GitHub Actions + CodeRabbit + Maintainer）**：6 平台构建/Clippy/Launcher 验证 + 治理路径检查 + 人类合并。
+2. **通读全量评论**：处理任何 Issue 前必须读到最后一条评论；若存在“先别做 / 暂缓 / on hold”等信号，立即停止并标记 `needs:human`。
+3. **禁止越权改流程红线**：自动修复 Loop 严禁修改 `.github/workflows/**` 或泄露任何密钥/Token；触及流程与依赖重大调整时标记 `needs:human` 交人拍板。
+4. **验证证据留痕**：Commit Body 必须写明受影响子系统、实跑验证命令与关键回归测试名；只报告实际观察到的输出，禁止编造证据。
