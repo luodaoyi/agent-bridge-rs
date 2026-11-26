@@ -8,7 +8,7 @@ export const TERMINAL_HEIGHT_MAX = 720;
 export const TERMINAL_HEIGHT_MAX_VH = 0.7;
 
 /** Group-scoped height (one value per Codex supervisor group). */
-export const TERMINAL_HEIGHT_STORAGE_PREFIX = "grok-bridge-group-terminal-height:";
+export const TERMINAL_HEIGHT_STORAGE_PREFIX = "agent-bridge-group-terminal-height:";
 
 /** In-tab listeners so every terminal in a group shares height immediately. */
 const heightListeners = new Map();

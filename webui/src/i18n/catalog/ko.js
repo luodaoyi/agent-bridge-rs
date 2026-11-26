@@ -1,16 +1,16 @@
 /** @type {Record<string, string>} */
 export default {
-  "doc.title": "Grok Bridge 세션",
+  "doc.title": "Agent Bridge 세션",
   "doc.description":
-    "Grok Bridge 로컬 세션 콘솔: Codex 슈퍼바이저 및 Grok 서브에이전트 관리",
+    "Agent Bridge 로컬 세션 콘솔: Codex 슈퍼바이저 및 Grok 서브에이전트 관리",
 
   "app.skipToSessions": "세션 목록으로 건너뛰기",
-  "app.brand": "GROK BRIDGE RUNTIME",
+  "app.brand": "AGENT BRIDGE RUNTIME",
   "app.title": "슈퍼바이저 및 서브에이전트 콘솔",
   "app.subtitle":
     "각 Codex 세션은 슈퍼바이저 역할을 하며, 해당 세션에서 시작된 Grok 세션이 서브에이전트입니다. 터미널 출력은 WebSocket을 통해 실시간으로 전송됩니다. 페이지를 닫아도 기존 세션은 종료되지 않습니다.",
   "app.runtimeVersion": "Runtime v{version}",
-  "app.githubTitle": "GitHub에서 grok-bridge-rs 열기",
+  "app.githubTitle": "GitHub에서 agent-bridge-rs 열기",
   "app.github": "GitHub",
 
   "connection.initial": "실시간 채널 연결 중",
@@ -67,7 +67,7 @@ export default {
   "error.reload": "다시 로드",
   "error.unknown": "알 수 없는 오류",
   "error.timeout": "요청 시간 초과, 자동으로 다시 시도 중",
-  "error.brand": "GROK BRIDGE",
+  "error.brand": "AGENT BRIDGE",
 
   "activity.working": "작업 중",
   "activity.waiting": "입력 대기",

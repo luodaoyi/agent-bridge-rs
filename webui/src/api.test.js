@@ -84,7 +84,7 @@ describe("normalizeVersionStatus", () => {
         latest: "0.6.2",
         update_available: true,
         release_url:
-          "https://github.com/luodaoyi/grok-bridge-rs/releases/tag/v0.6.2",
+          "https://github.com/luodaoyi/agent-bridge-rs/releases/tag/v0.6.2",
         checked_at_ms: 42,
       }),
     ).toEqual({
@@ -92,7 +92,7 @@ describe("normalizeVersionStatus", () => {
       latest: "0.6.2",
       update_available: true,
       release_url:
-        "https://github.com/luodaoyi/grok-bridge-rs/releases/tag/v0.6.2",
+        "https://github.com/luodaoyi/agent-bridge-rs/releases/tag/v0.6.2",
       checked_at_ms: 42,
     });
   });
@@ -117,7 +117,7 @@ describe("getVersionStatus", () => {
           latest: "0.6.2",
           update_available: true,
           release_url:
-            "https://github.com/luodaoyi/grok-bridge-rs/releases/tag/v0.6.2",
+            "https://github.com/luodaoyi/agent-bridge-rs/releases/tag/v0.6.2",
         }),
       ),
     );

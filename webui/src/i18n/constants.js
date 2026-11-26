@@ -18,7 +18,7 @@ export const SUPPORTED_LOCALES = [
 
 export const DEFAULT_LOCALE = "en";
 
-export const LOCALE_STORAGE_KEY = "grok-bridge-locale";
+export const LOCALE_STORAGE_KEY = "agent-bridge-locale";
 
 /** Native display names for the language switcher (not translated). */
 export const LOCALE_LABELS = {

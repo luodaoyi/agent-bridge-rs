@@ -1,16 +1,16 @@
 /** @type {Record<string, string>} */
 export default {
-  "doc.title": "Sesiones Grok Bridge",
+  "doc.title": "Sesiones Agent Bridge",
   "doc.description":
-    "Consola local de sesiones Grok Bridge: supervisores Codex y gestión de subagentes Grok",
+    "Consola local de sesiones Agent Bridge: supervisores Codex y gestión de subagentes Grok",
 
   "app.skipToSessions": "Saltar a la lista de sesiones",
-  "app.brand": "GROK BRIDGE RUNTIME",
+  "app.brand": "AGENT BRIDGE RUNTIME",
   "app.title": "Consola de supervisores y subagentes",
   "app.subtitle":
     "Cada sesión de Codex actúa como supervisor; las sesiones de Grok que lanza son sus subagentes. La salida del terminal se transmite en tiempo real vía WebSocket. Cerrar la página no detiene las sesiones existentes.",
   "app.runtimeVersion": "Runtime v{version}",
-  "app.githubTitle": "Abrir grok-bridge-rs en GitHub",
+  "app.githubTitle": "Abrir agent-bridge-rs en GitHub",
   "app.github": "GitHub",
 
   "connection.initial": "Conectando el canal en vivo",
@@ -67,7 +67,7 @@ export default {
   "error.reload": "Recargar",
   "error.unknown": "error desconocido",
   "error.timeout": "La solicitud agotó el tiempo de espera; reintentando automáticamente",
-  "error.brand": "GROK BRIDGE",
+  "error.brand": "AGENT BRIDGE",
 
   "activity.working": "En curso",
   "activity.waiting": "En espera",

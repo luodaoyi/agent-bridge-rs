@@ -1,16 +1,16 @@
 /** @type {Record<string, string>} */
 export default {
-  "doc.title": "เซสชัน Grok Bridge",
+  "doc.title": "เซสชัน Agent Bridge",
   "doc.description":
-    "คอนโซลเซสชันท้องถิ่นของ Grok Bridge: จัดการ Codex ซูเปอร์ไวเซอร์และ Grok ซับเอเจนต์",
+    "คอนโซลเซสชันท้องถิ่นของ Agent Bridge: จัดการ Codex ซูเปอร์ไวเซอร์และ Grok ซับเอเจนต์",
 
   "app.skipToSessions": "ข้ามไปยังรายการเซสชัน",
-  "app.brand": "GROK BRIDGE RUNTIME",
+  "app.brand": "AGENT BRIDGE RUNTIME",
   "app.title": "คอนโซลซูเปอร์ไวเซอร์และซับเอเจนต์",
   "app.subtitle":
     "แต่ละเซสชัน Codex ทำหน้าที่เป็นซูเปอร์ไวเซอร์ เซสชัน Grok ที่เปิดใช้จะเป็นซับเอเจนต์ เอาต์พุตเทอร์มินัลถูกส่งแบบเรียลไทม์ผ่าน WebSocket การปิดหน้าเว็บจะไม่ยุติเซสชันที่มีอยู่",
   "app.runtimeVersion": "Runtime v{version}",
-  "app.githubTitle": "เปิด grok-bridge-rs บน GitHub",
+  "app.githubTitle": "เปิด agent-bridge-rs บน GitHub",
   "app.github": "GitHub",
 
   "connection.initial": "กำลังเชื่อมต่อช่องถ่ายทอดสด",
@@ -67,7 +67,7 @@ export default {
   "error.reload": "โหลดใหม่",
   "error.unknown": "ข้อผิดพลาดที่ไม่ทราบสาเหตุ",
   "error.timeout": "คำขอหมดเวลา จะลองใหม่อัตโนมัติ",
-  "error.brand": "GROK BRIDGE",
+  "error.brand": "AGENT BRIDGE",
 
   "activity.working": "กำลังทำงาน",
   "activity.waiting": "รออินพุต",

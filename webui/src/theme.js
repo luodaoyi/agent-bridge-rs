@@ -1,4 +1,4 @@
-export const THEME_KEY = "grok-bridge-theme";
+export const THEME_KEY = "agent-bridge-theme";
 export const THEMES = ["auto", "light", "dark"];
 
 export function isTheme(value) {

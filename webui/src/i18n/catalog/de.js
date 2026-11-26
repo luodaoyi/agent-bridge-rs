@@ -1,16 +1,16 @@
 /** @type {Record<string, string>} */
 export default {
-  "doc.title": "Grok Bridge Sitzungen",
+  "doc.title": "Agent Bridge Sitzungen",
   "doc.description":
-    "Grok Bridge lokale Sitzungskonsole: Codex-Supervisoren und Grok-Subagenten-Verwaltung",
+    "Agent Bridge lokale Sitzungskonsole: Codex-Supervisoren und Grok-Subagenten-Verwaltung",
 
   "app.skipToSessions": "Zur Sitzungsliste springen",
-  "app.brand": "GROK BRIDGE RUNTIME",
+  "app.brand": "AGENT BRIDGE RUNTIME",
   "app.title": "Supervisor- und Subagenten-Konsole",
   "app.subtitle":
     "Jede Codex-Sitzung dient als Supervisor; die von ihr gestarteten Grok-Sitzungen sind ihre Subagenten. Terminalausgaben werden in Echtzeit über WebSocket übertragen. Das Schließen der Seite beendet bestehende Sitzungen nicht.",
   "app.runtimeVersion": "Runtime v{version}",
-  "app.githubTitle": "grok-bridge-rs auf GitHub öffnen",
+  "app.githubTitle": "agent-bridge-rs auf GitHub öffnen",
   "app.github": "GitHub",
 
   "connection.initial": "Live-Kanal wird verbunden",
@@ -70,7 +70,7 @@ export default {
   "error.reload": "Neu laden",
   "error.unknown": "unbekannter Fehler",
   "error.timeout": "Anfrage zeitüberschritten; automatischer erneuter Versuch",
-  "error.brand": "GROK BRIDGE",
+  "error.brand": "AGENT BRIDGE",
 
   "activity.working": "Aktiv",
   "activity.waiting": "Wartet",

@@ -1,16 +1,16 @@
 /** @type {Record<string, string>} */
 export default {
-  "doc.title": "جلسات Grok Bridge",
+  "doc.title": "جلسات Agent Bridge",
   "doc.description":
-    "وحدة تحكم الجلسات المحلية لـ Grok Bridge: إدارة مشرفي Codex ووكلاء Grok الفرعيين",
+    "وحدة تحكم الجلسات المحلية لـ Agent Bridge: إدارة مشرفي Codex ووكلاء Grok الفرعيين",
 
   "app.skipToSessions": "الانتقال إلى قائمة الجلسات",
-  "app.brand": "GROK BRIDGE RUNTIME",
+  "app.brand": "AGENT BRIDGE RUNTIME",
   "app.title": "وحدة تحكم المشرف والوكيل الفرعي",
   "app.subtitle":
     "كل جلسة Codex تعمل كمشرف؛ وجلسات Grok التي تُطلقها تظهر كوكلاء فرعيين. يتم بث مخرجات الطرفية في الوقت الفعلي عبر WebSocket. إغلاق الصفحة لا يُنهي الجلسات الحالية.",
   "app.runtimeVersion": "Runtime v{version}",
-  "app.githubTitle": "فتح grok-bridge-rs على GitHub",
+  "app.githubTitle": "فتح agent-bridge-rs على GitHub",
   "app.github": "GitHub",
 
   "connection.initial": "جارٍ الاتصال بالقناة المباشرة",
@@ -67,7 +67,7 @@ export default {
   "error.reload": "إعادة التحميل",
   "error.unknown": "خطأ غير معروف",
   "error.timeout": "انتهت مهلة الطلب؛ تتم إعادة المحاولة تلقائيًا",
-  "error.brand": "GROK BRIDGE",
+  "error.brand": "AGENT BRIDGE",
 
   "activity.working": "يعمل",
   "activity.waiting": "في الانتظار",

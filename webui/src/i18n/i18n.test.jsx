@@ -110,7 +110,7 @@ describe("catalog completeness", () => {
       }
     }
     // Spot-check a few high-visibility translations.
-    expect(catalogs["zh-CN"]["session.close"]).toBe("关闭 Grok");
+    expect(catalogs["zh-CN"]["session.close"]).toBe("关闭会话");
     expect(catalogs["zh-TW"]["session.close"]).toBe("關閉 Grok");
     expect(catalogs.fr["connection.connected"]).toMatch(/Canal|direct/i);
     expect(catalogs.de["connection.connected"]).toMatch(/Live-Kanal|verbunden/i);

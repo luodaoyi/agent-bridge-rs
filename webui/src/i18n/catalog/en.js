@@ -1,16 +1,16 @@
 /** @type {Record<string, string>} */
 export default {
-  "doc.title": "Grok Bridge Sessions",
+  "doc.title": "Agent Bridge Sessions",
   "doc.description":
-    "Grok Bridge local session console: Codex supervisors and Grok subagent management",
+    "Agent Bridge local session console: Codex / AGY supervisors and Codex / Grok subagent management",
 
   "app.skipToSessions": "Skip to session list",
-  "app.brand": "GROK BRIDGE RUNTIME",
+  "app.brand": "AGENT BRIDGE RUNTIME",
   "app.title": "Supervisor & Subagent Console",
   "app.subtitle":
-    "Each Codex session serves as a supervisor; the Grok sessions it launches are its sub-agents. Terminal output is pushed in real time via WebSocket. Closing the page does not terminate existing sessions.",
+    "Each Codex or AGY session serves as a supervisor; the Codex / Grok sessions it launches are its sub-agents. Terminal output is pushed in real time via WebSocket. Closing the page does not terminate existing sessions.",
   "app.runtimeVersion": "Runtime v{version}",
-  "app.githubTitle": "Open grok-bridge-rs on GitHub",
+  "app.githubTitle": "Open agent-bridge-rs on GitHub",
   "app.github": "GitHub",
 
   "connection.initial": "Connecting live channel",
@@ -33,8 +33,8 @@ export default {
   "theme.title": "{label} theme",
 
   "stats.aria": "Session statistics",
-  "stats.owners": "Supervisors (Codex)",
-  "stats.sessions": "Subagents (Grok)",
+  "stats.owners": "Supervisors",
+  "stats.sessions": "Subagents",
   "stats.working": "Working",
   "stats.waiting": "Waiting",
   "stats.done": "Done / Idle",
@@ -51,9 +51,9 @@ export default {
   "connecting.body":
     "A WebSocket connection to the local Runtime is being established; the first session snapshot will render immediately.",
 
-  "empty.title": "No Grok sessions",
+  "empty.title": "No subagent sessions",
   "empty.body":
-    "Grok sessions started by Codex appear here automatically as subagents, with terminal output and lifecycle status.",
+    "Codex or Grok sessions started by Codex / AGY appear here automatically as subagents, with terminal output and lifecycle status.",
 
   "board.aria": "Supervisor groups",
 
@@ -67,7 +67,7 @@ export default {
   "error.reload": "Reload",
   "error.unknown": "unknown error",
   "error.timeout": "Request timed out; retrying automatically",
-  "error.brand": "GROK BRIDGE",
+  "error.brand": "AGENT BRIDGE",
 
   "activity.working": "Working",
   "activity.waiting": "Waiting",
@@ -76,8 +76,8 @@ export default {
   "activity.unknown": "Unknown",
 
   "client.unmanaged": "Untracked",
-  "client.connected": "Codex online",
-  "client.disconnected": "Codex disconnected",
+  "client.connected": "Supervisor online",
+  "client.disconnected": "Supervisor disconnected",
   "client.orphaned": "Awaiting auto-cleanup",
   "client.closing": "Cleaning up",
   "client.unknown": "Unknown",
@@ -91,12 +91,12 @@ export default {
 
   "badge.phase": "PTY phase: {phase}",
 
-  "group.supervisor": "Supervisor · Codex",
-  "group.unowned": "Unlabeled Codex conversation",
+  "group.supervisor": "Supervisor",
+  "group.unowned": "Unlabeled host conversation",
   "group.subagentCount": "{n} subagents",
-  "group.closeAll": "Close all Grok for this Codex",
+  "group.closeAll": "Close all subagents for this host",
   "group.closeAllAria":
-    "Close all Grok subagents under supervisor {owner}",
+    "Close all subagents under supervisor {owner}",
   "group.summary.working": "{n} working",
   "group.summary.waiting": "{n} waiting",
   "group.summary.done": "{n} done/idle",
@@ -105,15 +105,15 @@ export default {
   "group.idPrefix": "id {id}",
 
   "session.subagent": "Subagent",
-  "session.close": "Close Grok",
+  "session.close": "Close Session",
   "session.closeAria": "Close subagent {id}",
   "session.waitingCollapsed": "Waiting: {reason}",
-  "session.waitingNote": "Waiting for Codex: {reason}",
+  "session.waitingNote": "Waiting for supervisor: {reason}",
   "session.meta.id": "Session ID",
   "session.meta.pid": "Process",
   "session.meta.pidValue": "PID {pid}",
   "session.meta.updated": "Last updated",
-  "session.meta.client": "Codex connection",
+  "session.meta.client": "Supervisor connection",
   "session.meta.autoClose": "Auto-cleanup countdown",
   "session.meta.hook": "Latest Hook",
   "session.meta.tool": "Current tool",
@@ -151,8 +151,8 @@ export default {
   "interactive.on": "On",
   "interactive.off": "Off",
   "interactive.aria": "Toggle interactive keyboard input for all terminals",
-  "interactive.offHint": "Enable keyboard input to all Grok terminals",
-  "interactive.warning": "Interactive mode is on: keystrokes and paste are sent to live Grok sessions. Terminal resize always follows the visible viewport. Reload resets keyboard input to read-only.",
+  "interactive.offHint": "Enable keyboard input to all subagent terminals",
+  "interactive.warning": "Interactive mode is on: keystrokes and paste are sent to live subagent sessions. Terminal resize always follows the visible viewport. Reload resets keyboard input to read-only.",
   "interactive.disconnected": "Live channel disconnected; input is not sent and is not buffered.",
   "interactive.invalidPayload": "Invalid terminal command payload",
   "interactive.sendFailed": "Failed to send the terminal command over the live channel",
@@ -165,16 +165,16 @@ export default {
   "interactive.dismiss": "Dismiss",
   "interactive.dismissAria": "Dismiss unconfirmed input notice",
 
-  "action.confirmCloseSession": "Close {id} and its Grok process?",
+  "action.confirmCloseSession": "Close {id} and its worker process?",
   "action.closedSession":
-    "Closed Grok session {id}. Live channel will push updates.",
+    "Closed session {id}. Live channel will push updates.",
   "action.closeFailed": "Close failed: {detail}",
   "action.confirmCloseGroup":
-    "Close all {count} Grok sessions under Codex “{owner}”?",
-  "action.groupEmpty": "This Codex group has no active Grok sessions.",
+    "Close all {count} subagent sessions under “{owner}”?",
+  "action.groupEmpty": "This group has no active subagent sessions.",
   "action.groupPartial":
     "Closed {closed}/{matched} sessions; failures: {failures}",
   "action.groupClosed":
-    "Closed all {count} Grok sessions under Codex “{owner}”. Live channel will push updates.",
+    "Closed all {count} subagent sessions under “{owner}”. Live channel will push updates.",
   "action.failureJoin": ", ",
 };

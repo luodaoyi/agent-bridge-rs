@@ -1,16 +1,16 @@
 /** @type {Record<string, string>} */
 export default {
-  "doc.title": "Grok Bridge セッション",
+  "doc.title": "Agent Bridge セッション",
   "doc.description":
-    "Grok Bridge ローカルセッションコンソール：Codex スーパーバイザーと Grok サブエージェント管理",
+    "Agent Bridge ローカルセッションコンソール：Codex スーパーバイザーと Grok サブエージェント管理",
 
   "app.skipToSessions": "セッション一覧へスキップ",
-  "app.brand": "GROK BRIDGE RUNTIME",
+  "app.brand": "AGENT BRIDGE RUNTIME",
   "app.title": "スーパーバイザー／サブエージェント コンソール",
   "app.subtitle":
     "各 Codex セッションはスーパーバイザーとして機能し、そこから起動された Grok セッションがサブエージェントとなります。ターミナル出力は WebSocket 経由でリアルタイムに配信されます。ページを閉じても既存のセッションは終了しません。",
   "app.runtimeVersion": "Runtime v{version}",
-  "app.githubTitle": "GitHub で grok-bridge-rs を開く",
+  "app.githubTitle": "GitHub で agent-bridge-rs を開く",
   "app.github": "GitHub",
 
   "connection.initial": "ライブチャネル接続中",
@@ -67,7 +67,7 @@ export default {
   "error.reload": "再読み込み",
   "error.unknown": "不明なエラー",
   "error.timeout": "リクエストがタイムアウトしました。自動で再試行します",
-  "error.brand": "GROK BRIDGE",
+  "error.brand": "AGENT BRIDGE",
 
   "activity.working": "作業中",
   "activity.waiting": "入力待ち",

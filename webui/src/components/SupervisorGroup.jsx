@@ -15,6 +15,18 @@ function sessionTitle(session) {
   return session.title || session.session;
 }
 
+function clientKindLabel(clientKind) {
+  if (clientKind === "agy") return "AGY";
+  if (clientKind === "codex") return "Codex";
+  return null;
+}
+
+function workerLabel(worker) {
+  if (worker === "codex") return "Codex";
+  if (worker === "grok") return "Grok";
+  return null;
+}
+
 export function SupervisorGroup({
   groupKey,
   owner,
@@ -33,6 +45,9 @@ export function SupervisorGroup({
   const { t, locale, formatNumber } = useI18n();
   const displayOwner = owner ?? t("group.unowned");
   const lifecycleState = dominantClientState(sessions);
+  const hostBadge = clientKindLabel(
+    sessions.find((session) => session.client_kind)?.client_kind,
+  );
   const baseId = useId();
   const tabRefs = useRef(new Map());
   const [selectedSessionId, setSelectedSessionId] = useState(
@@ -124,6 +139,11 @@ export function SupervisorGroup({
             <span className="subheader">
               {t("group.supervisor")}
             </span>
+            {hostBadge ? (
+              <span className="badge bg-purple-lt text-purple">
+                {hostBadge}
+              </span>
+            ) : null}
             <LifecycleBadge clientState={lifecycleState} />
           </div>
           <h2
@@ -199,6 +219,11 @@ export function SupervisorGroup({
                     <span aria-hidden="true" className="session-ordinal">
                       {ordinal}
                     </span>
+                    {workerLabel(session.worker) ? (
+                      <span className="badge bg-blue-lt text-blue">
+                        {workerLabel(session.worker)}
+                      </span>
+                    ) : null}
                     <ActivityBadge
                       activity={activity}
                       phase={session.phase}

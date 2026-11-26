@@ -1,16 +1,16 @@
 /** @type {Record<string, string>} */
 export default {
-  "doc.title": "Grok Bridge 会话管理",
+  "doc.title": "Agent Bridge 会话管理",
   "doc.description":
-    "Grok Bridge 本机会话控制台：Codex 监督者与 Grok 子代理状态管理",
+    "Agent Bridge 本机会话控制台：Codex / AGY 监督者与 Codex / Grok 子代理状态管理",
 
   "app.skipToSessions": "跳到会话列表",
-  "app.brand": "GROK BRIDGE RUNTIME",
+  "app.brand": "AGENT BRIDGE RUNTIME",
   "app.title": "监督者与子代理控制台",
   "app.subtitle":
-    "Codex 会话作为监督者，其启动的 Grok 会话作为子代理。终端输出通过 WebSocket 实时推送，关闭页面不会终止已有会话。",
+    "Codex 或 AGY 会话作为监督者，其启动的 Codex / Grok 会话作为子代理。终端输出通过 WebSocket 实时推送，关闭页面不会终止已有会话。",
   "app.runtimeVersion": "Runtime v{version}",
-  "app.githubTitle": "在 GitHub 打开 grok-bridge-rs",
+  "app.githubTitle": "在 GitHub 打开 agent-bridge-rs",
   "app.github": "GitHub",
 
   "connection.initial": "实时通道连接中",
@@ -33,8 +33,8 @@ export default {
   "theme.title": "{label}主题",
 
   "stats.aria": "会话统计",
-  "stats.owners": "监督者（Codex）",
-  "stats.sessions": "子代理（Grok）",
+  "stats.owners": "监督者",
+  "stats.sessions": "子代理",
   "stats.working": "工作中",
   "stats.waiting": "等待输入",
   "stats.done": "完成 / 空闲",
@@ -51,9 +51,9 @@ export default {
   "connecting.body":
     "正在通过 WebSocket 连接本机 Runtime；收到首份会话数据后，页面会立即更新。",
 
-  "empty.title": "暂无 Grok 会话",
+  "empty.title": "暂无子代理会话",
   "empty.body":
-    "Codex 启动的 Grok 会话会自动以子代理形式出现在这里，同时显示终端输出和生命周期状态。",
+    "Codex 或 AGY 启动的 Codex / Grok 会话会自动以子代理形式出现在这里，同时显示终端输出和生命周期状态。",
 
   "board.aria": "监督者分组",
 
@@ -67,7 +67,7 @@ export default {
   "error.reload": "重新加载",
   "error.unknown": "未知错误",
   "error.timeout": "请求超时，正在自动重试",
-  "error.brand": "GROK BRIDGE",
+  "error.brand": "AGENT BRIDGE",
 
   "activity.working": "工作中",
   "activity.waiting": "等待输入",
@@ -76,8 +76,8 @@ export default {
   "activity.unknown": "状态未知",
 
   "client.unmanaged": "未跟踪",
-  "client.connected": "Codex 在线",
-  "client.disconnected": "Codex 已断开",
+  "client.connected": "监督者在线",
+  "client.disconnected": "监督者已断开",
   "client.orphaned": "等待自动关闭",
   "client.closing": "正在关闭",
   "client.unknown": "未知",
@@ -91,11 +91,11 @@ export default {
 
   "badge.phase": "PTY 阶段：{phase}",
 
-  "group.supervisor": "监督者 · Codex",
-  "group.unowned": "未标记的 Codex 会话",
+  "group.supervisor": "监督者",
+  "group.unowned": "未标记的宿主会话",
   "group.subagentCount": "{n} 个子代理",
-  "group.closeAll": "关闭该 Codex 下的全部 Grok 会话",
-  "group.closeAllAria": "关闭监督者 {owner} 下的全部 Grok 会话",
+  "group.closeAll": "关闭该监督者下的全部子代理",
+  "group.closeAllAria": "关闭监督者 {owner} 下的全部子代理",
   "group.summary.working": "工作中 {n}",
   "group.summary.waiting": "等待输入 {n}",
   "group.summary.done": "完成或空闲 {n}",
@@ -104,15 +104,15 @@ export default {
   "group.idPrefix": "id {id}",
 
   "session.subagent": "子代理",
-  "session.close": "关闭 Grok",
+  "session.close": "关闭会话",
   "session.closeAria": "关闭子代理 {id}",
   "session.waitingCollapsed": "等待：{reason}",
-  "session.waitingNote": "等待 Codex：{reason}",
+  "session.waitingNote": "等待监督者：{reason}",
   "session.meta.id": "会话 ID",
   "session.meta.pid": "进程",
   "session.meta.pidValue": "PID {pid}",
   "session.meta.updated": "最近更新",
-  "session.meta.client": "Codex 连接",
+  "session.meta.client": "监督者连接",
   "session.meta.autoClose": "自动关闭倒计时",
   "session.meta.hook": "最近 Hook",
   "session.meta.tool": "当前工具",
@@ -149,8 +149,8 @@ export default {
   "interactive.on": "开",
   "interactive.off": "关",
   "interactive.aria": "开启或关闭所有终端的键盘输入",
-  "interactive.offHint": "开启所有 Grok 终端的键盘输入",
-  "interactive.warning": "交互模式已开启。按键操作和粘贴内容会发送到对应的 Grok 会话；终端尺寸会随显示区域自动调整。刷新页面后，交互模式会自动关闭。",
+  "interactive.offHint": "开启所有子代理终端的键盘输入",
+  "interactive.warning": "交互模式已开启。按键操作和粘贴内容会发送到对应的子代理会话；终端尺寸会随显示区域自动调整。刷新页面后，交互模式会自动关闭。",
   "interactive.disconnected": "实时通道已断开；输入不会发送，也不会暂存。",
   "interactive.invalidPayload": "终端命令参数无效",
   "interactive.sendFailed": "无法通过实时通道发送终端命令",
@@ -163,15 +163,15 @@ export default {
   "interactive.dismiss": "忽略",
   "interactive.dismissAria": "忽略未确认输入提示",
 
-  "action.confirmCloseSession": "确定要关闭会话 {id} 及其 Grok 进程吗？",
-  "action.closedSession": "已关闭 Grok 会话 {id}，状态将通过实时通道更新。",
+  "action.confirmCloseSession": "确定要关闭会话 {id} 及其子进程吗？",
+  "action.closedSession": "已关闭会话 {id}，状态将通过实时通道更新。",
   "action.closeFailed": "关闭失败：{detail}",
   "action.confirmCloseGroup":
-    "确定要关闭 Codex“{owner}”下的全部 {count} 个 Grok 会话吗？",
-  "action.groupEmpty": "该 Codex 分组中已无可关闭的 Grok 会话。",
+    "确定要关闭监督者“{owner}”下的全部 {count} 个子代理会话吗？",
+  "action.groupEmpty": "该分组中已无可关闭的子代理会话。",
   "action.groupPartial":
     "已关闭 {closed}/{matched} 个会话；失败：{failures}",
   "action.groupClosed":
-    "已关闭 Codex“{owner}”下的全部 {count} 个 Grok 会话，状态将通过实时通道更新。",
+    "已关闭监督者“{owner}”下的全部 {count} 个子代理会话，状态将通过实时通道更新。",
   "action.failureJoin": "、",
 };

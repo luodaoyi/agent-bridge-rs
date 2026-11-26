@@ -101,7 +101,7 @@ describe("localized labels and times", () => {
     const tEn = createTranslator("en");
     expect(activityLabel("working", tZh)).toBe("工作中");
     expect(activityLabel("working", tEn)).toBe("Working");
-    expect(clientStateLabel("connected", tZh)).toBe("Codex 在线");
+    expect(clientStateLabel("connected", tZh)).toBe("监督者在线");
     expect(clientLifecycleLabel("orphaned", tZh)).toBe("自动关闭倒计时");
     expect(clientLifecycleLabel("orphaned", tEn)).toBe("Cleanup countdown");
   });

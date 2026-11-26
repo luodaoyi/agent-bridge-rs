@@ -14,6 +14,12 @@ import { SessionLifecycleHint } from "./SessionLifecycleHint.jsx";
 import { ActivityBadge, LifecycleBadge } from "./StatusBadge.jsx";
 import { Terminal } from "./Terminal.jsx";
 
+function workerDisplay(worker) {
+  if (worker === "codex") return "Codex";
+  if (worker === "grok") return "Grok";
+  return null;
+}
+
 export function SubagentCard({
   session,
   heightKey,
@@ -25,6 +31,7 @@ export function SubagentCard({
   const { t, locale } = useI18n();
   const activity = activityOf(session);
   const title = session.title || session.session;
+  const workerBadge = workerDisplay(session.worker);
   const hint = lifecycleHintModel(session);
   const riskStates = hint.kind === "orphaned" || hint.kind === "closing";
   // Single local clock per orphaned session: shared by collapsed summary + banner.
@@ -58,6 +65,11 @@ export function SubagentCard({
             <span className="subheader">
               {t("session.subagent")}
             </span>
+            {workerBadge ? (
+              <span className="badge bg-blue-lt text-blue">
+                {workerBadge}
+              </span>
+            ) : null}
             <h3
               className="subagent-title"
               title={title}

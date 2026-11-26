@@ -1,16 +1,16 @@
 /** @type {Record<string, string>} */
 export default {
-  "doc.title": "Phiên Grok Bridge",
+  "doc.title": "Phiên Agent Bridge",
   "doc.description":
-    "Bảng điều khiển phiên cục bộ Grok Bridge: quản lý giám sát viên Codex và agent con Grok",
+    "Bảng điều khiển phiên cục bộ Agent Bridge: quản lý giám sát viên Codex và agent con Grok",
 
   "app.skipToSessions": "Chuyển đến danh sách phiên",
-  "app.brand": "GROK BRIDGE RUNTIME",
+  "app.brand": "AGENT BRIDGE RUNTIME",
   "app.title": "Bảng điều khiển Giám sát viên & Agent con",
   "app.subtitle":
     "Mỗi phiên Codex đóng vai trò giám sát viên; các phiên Grok do nó khởi chạy là agent con. Đầu ra terminal được đẩy theo thời gian thực qua WebSocket. Đóng trang không kết thúc các phiên hiện có.",
   "app.runtimeVersion": "Runtime v{version}",
-  "app.githubTitle": "Mở grok-bridge-rs trên GitHub",
+  "app.githubTitle": "Mở agent-bridge-rs trên GitHub",
   "app.github": "GitHub",
 
   "connection.initial": "Đang kết nối kênh trực tiếp",
@@ -67,7 +67,7 @@ export default {
   "error.reload": "Tải lại",
   "error.unknown": "lỗi không xác định",
   "error.timeout": "Yêu cầu hết thời gian; đang tự động thử lại",
-  "error.brand": "GROK BRIDGE",
+  "error.brand": "AGENT BRIDGE",
 
   "activity.working": "Đang làm việc",
   "activity.waiting": "Đang chờ",

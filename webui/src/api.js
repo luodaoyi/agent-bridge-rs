@@ -1,4 +1,4 @@
-const WEB_UI_HEADER = { "X-Grok-Bridge-WebUI": "1" };
+const WEB_UI_HEADER = { "X-Agent-Bridge-WebUI": "1" };
 const DEFAULT_TIMEOUT_MS = 8000;
 
 async function responseError(response) {
@@ -116,7 +116,7 @@ export function normalizeVersionStatus(data) {
   const releaseUrl =
     typeof data.release_url === "string" && data.release_url.length > 0
       ? data.release_url
-      : "https://github.com/luodaoyi/grok-bridge-rs/releases/latest";
+      : "https://github.com/luodaoyi/agent-bridge-rs/releases/latest";
   return {
     current: data.current,
     latest,

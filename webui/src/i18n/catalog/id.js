@@ -1,16 +1,16 @@
 /** @type {Record<string, string>} */
 export default {
-  "doc.title": "Sesi Grok Bridge",
+  "doc.title": "Sesi Agent Bridge",
   "doc.description":
-    "Konsol sesi lokal Grok Bridge: manajemen supervisor Codex dan subagen Grok",
+    "Konsol sesi lokal Agent Bridge: manajemen supervisor Codex dan subagen Grok",
 
   "app.skipToSessions": "Loncat ke daftar sesi",
-  "app.brand": "GROK BRIDGE RUNTIME",
+  "app.brand": "AGENT BRIDGE RUNTIME",
   "app.title": "Konsol Supervisor & Subagen",
   "app.subtitle":
     "Setiap sesi Codex berperan sebagai supervisor; sesi Grok yang diluncurkannya menjadi subagen. Output terminal dikirim secara real time melalui WebSocket. Menutup halaman tidak menghentikan sesi yang sudah ada.",
   "app.runtimeVersion": "Runtime v{version}",
-  "app.githubTitle": "Buka grok-bridge-rs di GitHub",
+  "app.githubTitle": "Buka agent-bridge-rs di GitHub",
   "app.github": "GitHub",
 
   "connection.initial": "Menghubungkan saluran langsung",
@@ -67,7 +67,7 @@ export default {
   "error.reload": "Muat ulang",
   "error.unknown": "kesalahan tidak diketahui",
   "error.timeout": "Permintaan habis waktu; mencoba ulang otomatis",
-  "error.brand": "GROK BRIDGE",
+  "error.brand": "AGENT BRIDGE",
 
   "activity.working": "Bekerja",
   "activity.waiting": "Menunggu",

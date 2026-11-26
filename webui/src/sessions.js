@@ -223,6 +223,8 @@ export function sessionsSignature(sessions) {
   return JSON.stringify(
     sessions.map((session) => [
       session.session,
+      session.worker,
+      session.client_kind,
       session.owner,
       session.client_session_id,
       session.client_state,
@@ -234,6 +236,9 @@ export function sessionsSignature(sessions) {
       session.phase,
       session.title,
       session.cwd,
+      session.model,
+      session.sandbox,
+      session.dangerously_bypass,
       session.process_id,
       session.updated_at_ms,
       session.activity,

@@ -1,16 +1,16 @@
 /** @type {Record<string, string>} */
 export default {
-  "doc.title": "Grok Bridge 工作階段管理",
+  "doc.title": "Agent Bridge 工作階段管理",
   "doc.description":
-    "Grok Bridge 本機工作階段主控台：Codex 監督者與 Grok 子代理狀態管理",
+    "Agent Bridge 本機工作階段主控台：Codex 監督者與 Grok 子代理狀態管理",
 
   "app.skipToSessions": "跳到工作階段列表",
-  "app.brand": "GROK BRIDGE RUNTIME",
+  "app.brand": "AGENT BRIDGE RUNTIME",
   "app.title": "監督者與子代理主控台",
   "app.subtitle":
     "Codex 工作階段作為監督者，其啟動的 Grok 工作階段作為子代理。終端輸出透過 WebSocket 即時推送，關閉頁面不會終止現有工作階段。",
   "app.runtimeVersion": "Runtime v{version}",
-  "app.githubTitle": "在 GitHub 開啟 grok-bridge-rs",
+  "app.githubTitle": "在 GitHub 開啟 agent-bridge-rs",
   "app.github": "GitHub",
 
   "connection.initial": "正在連線至即時通道",
@@ -67,7 +67,7 @@ export default {
   "error.reload": "重新載入",
   "error.unknown": "未知錯誤",
   "error.timeout": "請求逾時，正在自動重試",
-  "error.brand": "GROK BRIDGE",
+  "error.brand": "AGENT BRIDGE",
 
   "activity.working": "工作中",
   "activity.waiting": "等待輸入",

@@ -440,4 +440,24 @@ describe("SupervisorGroup session tabs", () => {
     await leave(tab1, null);
     expect(onBlur).toHaveBeenCalledTimes(1);
   });
+
+  it("renders host and worker badges for AGY and mixed Codex/Grok workers", async () => {
+    await renderGroup([
+      baseSession({
+        session: "gbt-codex",
+        worker: "codex",
+        client_kind: "agy",
+        title: "Codex Worker",
+      }),
+      baseSession({
+        session: "gbt-grok",
+        worker: "grok",
+        client_kind: "agy",
+        title: "Grok Worker",
+      }),
+    ]);
+    expect(container.textContent).toContain("AGY");
+    expect(container.textContent).toContain("Codex");
+    expect(container.textContent).toContain("Grok");
+  });
 });

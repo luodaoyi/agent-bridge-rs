@@ -96,7 +96,7 @@ function mockFetch(handlers = {}) {
           latest: null,
           update_available: false,
           release_url:
-            "https://github.com/luodaoyi/grok-bridge-rs/releases/latest",
+            "https://github.com/luodaoyi/agent-bridge-rs/releases/latest",
         },
       );
     }
@@ -171,7 +171,7 @@ describe("App", () => {
     );
     window.localStorage.clear();
     // Keep existing Chinese UI assertions stable regardless of host language.
-    window.localStorage.setItem("grok-bridge-locale", "zh-CN");
+    window.localStorage.setItem("agent-bridge-locale", "zh-CN");
     vi.stubGlobal("fetch", mockFetch());
     container = document.createElement("div");
     document.body.append(container);
@@ -209,7 +209,7 @@ describe("App", () => {
   it("renders supervisor/subagent groups, stats, terminal shells and no unowned batch close", async () => {
     await renderAppAndConnect();
     expect(container.textContent).toContain("Codex A/中文");
-    expect(container.textContent).toContain("未标记的 Codex 会话");
+    expect(container.textContent).toContain("未标记的宿主会话");
     expect(container.textContent).toContain("监督者");
     expect(container.textContent).toContain("子代理");
     expect(container.textContent).toContain("GitHub");
@@ -217,7 +217,7 @@ describe("App", () => {
     expect(container.textContent).toContain("实时通道已连接");
     expect(container.textContent).toContain("WebSocket");
     expect(
-      container.querySelector('a[href="https://github.com/luodaoyi/grok-bridge-rs"]'),
+      container.querySelector('a[href="https://github.com/luodaoyi/agent-bridge-rs"]'),
     ).not.toBeNull();
     expect(container.querySelectorAll("details.group")).toHaveLength(2);
     expect(container.querySelectorAll("details.session")).toHaveLength(2);
@@ -230,14 +230,14 @@ describe("App", () => {
     expect(container.querySelector('[href="#session-board"]')).not.toBeNull();
     expect(container.querySelectorAll("button")).toSatisfy((buttons) =>
       [...buttons].some((button) =>
-        button.textContent.includes("关闭该 Codex 下的全部 Grok 会话"),
+        button.textContent.includes("关闭该监督者下的全部子代理"),
       ),
     );
     expect(
       [...container.querySelectorAll("details.group")]
         .find((group) => group.dataset.ownerKey === "missing-owner")
         .textContent,
-    ).not.toContain("关闭该 Codex 下的全部 Grok 会话");
+    ).not.toContain("关闭该监督者下的全部子代理");
     expect(MockXTerm.instances.every((term) => term.options.disableStdin)).toBe(
       true,
     );
@@ -303,7 +303,7 @@ describe("App", () => {
           latest: "0.6.2",
           update_available: true,
           release_url:
-            "https://github.com/luodaoyi/grok-bridge-rs/releases/tag/v0.6.2",
+            "https://github.com/luodaoyi/agent-bridge-rs/releases/tag/v0.6.2",
         },
       }),
     );
@@ -311,7 +311,7 @@ describe("App", () => {
     expect(container.textContent).toContain("发现新版本 v0.6.2");
     expect(
       container.querySelector(
-        'a[href="https://github.com/luodaoyi/grok-bridge-rs/releases/tag/v0.6.2"]',
+        'a[href="https://github.com/luodaoyi/agent-bridge-rs/releases/tag/v0.6.2"]',
       ),
     ).not.toBeNull();
     const dismiss = [...container.querySelectorAll("button")].find((button) =>
@@ -320,7 +320,7 @@ describe("App", () => {
     await act(async () => dismiss.click());
     await settle();
     expect(container.querySelector("[data-update-banner]")).toBeNull();
-    expect(window.localStorage.getItem("grok-bridge-dismissed-update")).toBe(
+    expect(window.localStorage.getItem("agent-bridge-dismissed-update")).toBe(
       "0.6.2",
     );
   });
@@ -335,7 +335,7 @@ describe("App", () => {
       (group) => group.dataset.ownerKey === "client:codex-a",
     );
     const sessionClose = [...ownedGroup.querySelectorAll("button")].find(
-      (button) => button.textContent.trim() === "关闭 Grok",
+      (button) => button.textContent.trim() === "关闭会话",
     );
     await act(async () => sessionClose.click());
     await settle();
@@ -343,13 +343,13 @@ describe("App", () => {
       "/api/sessions/gbt-a/close",
       expect.objectContaining({
         method: "POST",
-        headers: { "X-Grok-Bridge-WebUI": "1" },
+        headers: { "X-Agent-Bridge-WebUI": "1" },
       }),
     );
 
     const ownerClose = [...container.querySelectorAll("button")].find(
       (button) =>
-        button.textContent.includes("关闭该 Codex 下的全部 Grok 会话"),
+        button.textContent.includes("关闭该监督者下的全部子代理"),
     );
     await act(async () => ownerClose.click());
     await settle();
@@ -357,11 +357,11 @@ describe("App", () => {
       "/api/clients/codex-a/close",
       expect.objectContaining({
         method: "POST",
-        headers: { "X-Grok-Bridge-WebUI": "1" },
+        headers: { "X-Agent-Bridge-WebUI": "1" },
       }),
     );
     expect(container.textContent).toContain(
-      "已关闭 Codex“Codex A/中文”下的全部 1 个 Grok 会话",
+      "已关闭监督者“Codex A/中文”下的全部 1 个子代理会话",
     );
 
     const sessionGets = fetch.mock.calls.filter(
@@ -530,7 +530,7 @@ describe("App", () => {
     expect(toggle.getAttribute("aria-checked")).toBe("false");
     expect(toggle.dataset.interactive).toBe("off");
     expect(toggle.getAttribute("title")).toBe(
-      "开启所有 Grok 终端的键盘输入",
+      "开启所有子代理终端的键盘输入",
     );
     expect(
       [...container.querySelectorAll("[data-readonly]")].every(
@@ -540,7 +540,7 @@ describe("App", () => {
     expect(MockXTerm.instances.every((term) => term.options.disableStdin)).toBe(
       true,
     );
-    expect(window.localStorage.getItem("grok-bridge-interactive")).toBeNull();
+    expect(window.localStorage.getItem("agent-bridge-interactive")).toBeNull();
 
     await act(async () => toggle.click());
     await settle();
@@ -554,7 +554,7 @@ describe("App", () => {
     expect(MockXTerm.instances.every((term) => !term.options.disableStdin)).toBe(
       true,
     );
-    expect(window.localStorage.getItem("grok-bridge-interactive")).toBeNull();
+    expect(window.localStorage.getItem("agent-bridge-interactive")).toBeNull();
   });
 
   it("sends terminal_input over the events WebSocket only while interactive", async () => {
@@ -682,7 +682,7 @@ describe("App", () => {
     };
     await renderAppAndConnect([waitingSession]);
     expect(document.documentElement.lang).toBe("zh-CN");
-    expect(document.title).toContain("Grok Bridge");
+    expect(document.title).toContain("Agent Bridge");
     const switcher = container.querySelector("[data-language-switcher]");
     expect(switcher).not.toBeNull();
     expect(switcher.querySelector("select")).toBeNull();
@@ -718,10 +718,10 @@ describe("App", () => {
 
     await pickLocale("en");
     expect(document.documentElement.lang).toBe("en");
-    expect(window.localStorage.getItem("grok-bridge-locale")).toBe("en");
+    expect(window.localStorage.getItem("agent-bridge-locale")).toBe("en");
     expect(container.textContent).toContain("Supervisor");
     expect(container.textContent).toContain("Live channel connected");
-    expect(container.textContent).toContain("Close Grok");
+    expect(container.textContent).toContain("Close Session");
     // Raw session fields stay as provided by the Runtime.
     expect(container.textContent).toContain("Codex A/中文");
     expect(container.textContent).toContain("WAIT_TITLE_RAW");
@@ -733,7 +733,7 @@ describe("App", () => {
 
     await pickLocale("fr");
     expect(document.documentElement.lang).toBe("fr");
-    expect(window.localStorage.getItem("grok-bridge-locale")).toBe("fr");
+    expect(window.localStorage.getItem("agent-bridge-locale")).toBe("fr");
     expect(container.textContent).toMatch(/Canal en direct connecté|sous-agent|Fermer Grok/i);
     expect(container.textContent).toContain("ask_user:confirm_path");
     expect(container.textContent).toContain("WAIT_TITLE_RAW");
