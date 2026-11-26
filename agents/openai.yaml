@@ -1,7 +1,7 @@
 interface:
-  display_name: "Grok Build Runtime"
-  short_description: "Delegate and monitor work through the local Grok runtime"
-  default_prompt: "Use $grok-build to delegate this implementation through the local Grok runtime, monitor it with read and wait, then independently verify the repository changes."
+  display_name: "Agent Bridge Runtime"
+  short_description: "Delegate and monitor Grok or Codex coding subagents through the local agent-bridge runtime"
+  default_prompt: "Use $agent-bridge with --worker grok to delegate this implementation through the local agent-bridge runtime, monitor it with read and wait, then independently verify the repository changes."
 
 policy:
   allow_implicit_invocation: true

@@ -1,30 +1,30 @@
 ---
-name: grok-build
-description: Use Grok Build as a persistent local coding subagent for implementation, repair, testing, and follow-up work through the bundled Runtime CLI on Windows, Linux, or macOS. Use when Codex should delegate a bounded task while retaining planning and final-review ownership, when machine-readable create/read/wait/send control or the localhost session WebUI is useful, or when the user explicitly asks for Grok, grok-build, or the bundled wrapper. Supports multiple independent sessions and an optional per-session egui terminal for human takeover. Requires an authenticated Grok CLI.
+name: agent-bridge
+description: Use Grok Build (or Codex) as a persistent local coding subagent for implementation, repair, testing, and follow-up work through the bundled agent-bridge Runtime CLI on Windows, Linux, or macOS. Use when the supervisor agent should delegate a bounded task while retaining planning, adversarial review, and final verification ownership, when machine-readable create/read/wait/send control or the localhost session WebUI is useful, or when the user explicitly asks for agent-bridge, grok, or codex subagents. Requires an authenticated worker CLI.
 ---
 
-# Grok Build Local Runtime
+# Agent Bridge Local Runtime (Codex Host)
 
-Resolve `<skill-dir>` as the directory containing this file. Resolve `<bridge>` once per Codex task from the actual host OS and architecture; reuse that absolute path for every later command. Do not enumerate, sort, probe, or execute candidate binaries.
+Resolve `<skill-dir>` as the directory containing this file. Resolve `<bridge>` once per task from the actual host OS and architecture; reuse that absolute path for every later command. Do not enumerate, sort, probe, or execute candidate binaries.
 
 - On Unix, run `uname -s` and `uname -m` once.
-- On Windows, run `powershell -NoProfile -Command "[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()"` once. Map `X64` to x86_64 and `Arm64` to ARM64. This reports the underlying OS architecture even when the host agent runs under emulation. If that API is unavailable, use `PROCESSOR_ARCHITEW6432` when set, otherwise `PROCESSOR_ARCHITECTURE`.
+- On Windows, run `powershell -NoProfile -Command "[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()"` once. Map `X64` to x86_64 and `Arm64` to ARM64. If that API is unavailable, use `PROCESSOR_ARCHITEW6432` when set, otherwise `PROCESSOR_ARCHITECTURE`.
 - Map only the detected pair through this table. Treat `uname -s` result `Darwin` as `macOS`, `AMD64` as x86_64, and `aarch64`/`arm64` as ARM64. If the pair is unsupported or the selected file is missing, stop and report it instead of trying another architecture.
 
 | Host | Executable |
 | --- | --- |
-| Windows x86_64 | `<skill-dir>/bin/windows-x86_64/grok-bridge.exe` |
-| Windows ARM64 | `<skill-dir>/bin/windows-arm64/grok-bridge.exe` |
-| Linux x86_64 | `<skill-dir>/bin/linux-x86_64/grok-bridge` |
-| Linux ARM64 | `<skill-dir>/bin/linux-arm64/grok-bridge` |
-| macOS x86_64 | `<skill-dir>/bin/macos-x86_64/grok-bridge` |
-| macOS ARM64 | `<skill-dir>/bin/macos-arm64/grok-bridge` |
+| Windows x86_64 | `<skill-dir>/bin/windows-x86_64/agent-bridge.exe` |
+| Windows ARM64 | `<skill-dir>/bin/windows-arm64/agent-bridge.exe` |
+| Linux x86_64 | `<skill-dir>/bin/linux-x86_64/agent-bridge` |
+| Linux ARM64 | `<skill-dir>/bin/linux-arm64/agent-bridge` |
+| macOS x86_64 | `<skill-dir>/bin/macos-x86_64/agent-bridge` |
+| macOS ARM64 | `<skill-dir>/bin/macos-arm64/agent-bridge` |
 
 Refer to the selected executable as `<bridge>` below. Do not download another wrapper, invoke Python, or fall back to a different bundled architecture.
 
 ## Subagent Model
 
-Treat each created Grok session as a persistent subagent handle, not as a one-shot shell command. Codex owns task decomposition, integration, user communication, and final verification; Grok owns the concrete implementation task delegated to that session.
+Treat each created worker session as a persistent subagent handle, not as a one-shot shell command. The host agent (Codex) owns task decomposition, integration, user communication, independent diff/test verification, and challenge feedback; the worker (`--worker grok`) owns the concrete implementation task delegated to that session.
 
 Before `create`, define a delegation contract containing:
 
@@ -33,127 +33,39 @@ Before `create`, define a delegation contract containing:
 - observable acceptance criteria and the exact checks to run;
 - relevant repository constraints and prohibited external or irreversible actions.
 
-Reuse the same session for questions, evidence, corrections, and retries on that task. Independent tasks may use separate sessions concurrently when their write sets and shared resources do not overlap; tasks with ordering dependencies stay sequential. Codex may continue non-conflicting inspection, planning, or verification while Grok works. Do not create duplicate sessions for the same task merely because a turn is slow.
-
-For a user-authorized task in a trusted repository, use `--always-approve` when the delegation contract is sufficiently bounded for Grok to edit and run non-destructive checks autonomously. Omit it when the repository, prompt, write scope, or requested commands are not trusted. Automatic approval never expands the user's authorization or permits secrets, publication, destructive operations, or writes outside the declared scope.
+Reuse the same session for questions, evidence, corrections, and retries on that task. For a user-authorized task in a trusted repository, pass `--always-approve` when the delegation contract is sufficiently bounded.
 
 ## Workflow
 
 1. Inspect the repository, current changes, constraints, and acceptance criteria.
 2. Bootstrap Hooks and the Runtime before any command that can auto-start the singleton:
-   - Run `<bridge> hooks status` first. If its JSON reports `installed: true`, do not run `hooks install`. If it reports false, or the bundled executable was replaced, run `<bridge> hooks install` once from a user context allowed to write `$GROK_HOME` or the default `~/.grok`, then confirm with `hooks status`. The command updates only managed entries; release archives also include fresh-install templates under `hooks/windows` and `hooks/unix`.
-   - Run `<bridge> server status` before `list`, `create`, `show`, `read`, `send`, `write`, `resize`, `wait`, `close`, `heartbeat`, `close-codex`, `terminal`, or `server ui`. `server status` is the non-starting liveness probe. Do not use `list` as a liveness probe because it auto-starts the singleton.
-   - If `server status` succeeds, reuse that singleton. If it reports that the Runtime is stopped, run `<bridge> server start` from a user context allowed to write `$GROK_HOME` or the default `~/.grok`, then require a successful `server status` before continuing. Starting a detached process from inside a filesystem sandbox does not remove that sandbox.
-   - When the host agent provides an approval or sandbox-escalation mechanism, use it on the first attempt for `hooks install` and `server start`. Do not first run either command inside the project sandbox merely to observe the expected write failure.
-   - Run `<bridge> doctor` only when Grok availability is uncertain; it does not replace the Hooks or Runtime checks above.
-
-   If session creation still reports that the Grok state directory is not writable, run `server status` first. When a singleton is running, inspect `list` for unrelated sessions and stop it only when no sessions are active or the user explicitly authorizes interruption. When no singleton is running, do not run `list`; start it directly from a writable user context. Retry `create` only after the restarted singleton passes `server status`.
-3. Create one focused session per delegated task. Include the delegation contract in the prompt and select automatic approval according to the Subagent Model. Serialize the contract as one line before passing it to `--prompt`: keep the labeled clauses, but replace CR/LF with spaces. This preserves the whole contract even when a Windows installation resolves Grok through a command shim, where embedded line breaks can otherwise submit only the first line or be interpreted by the shell.
+   - Run `<bridge> hooks status --worker grok` first. If its JSON reports `installed: true`, do not run `hooks install`. Otherwise run `<bridge> hooks install --worker grok` from a writable user context, then confirm with `hooks status --worker grok`.
+   - Run `<bridge> server status` before `list`, `create`, `show`, `read`, `send`, `write`, `resize`, `wait`, `close`, `heartbeat`, `close-client`, `terminal`, or `server ui`.
+   - If `server status` reports stopped, run `<bridge> server start` from a writable user context and require a successful `server status` before continuing.
+   - Run `<bridge> doctor --worker grok` only when worker availability is uncertain.
+3. Create one focused session per delegated task. **`--worker` is required** (`--worker grok` when delegating from Codex). Flatten `--prompt` to one line (replace CR/LF with spaces).
 
 ```text
-<bridge> create --cwd <absolute-repository-path> --owner "<short-current-Codex-conversation-title>" --prompt "<single-line-delegation-contract>" [--always-approve]
+<bridge> create --worker grok --cwd <absolute-repository-path> --owner "<short-conversation-title>" --prompt "<single-line-delegation-contract>" [--always-approve] [--model <model>]
 ```
 
-Before every `create`, summarize the current Codex conversation into a short, recognizable, non-secret title and pass it through `--owner`. Reuse exactly the same title for later Grok sessions created by that Codex conversation. The CLI automatically attaches `CODEX_THREAD_ID`, falling back to `CODEX_SESSION_ID`, as the stable machine identity; the WebUI groups by that identity and displays owner as the readable title. Skill-driven calls must still provide the title explicitly. Optional creation arguments are `--model <model>` and `--always-approve`. Parse the JSON response, save `result.value.session`, and associate that handle with its delegated task and write lock.
-
-4. Treat the returned handle like a running subagent. If its result is not an immediate dependency, continue non-conflicting work and inspect it at a useful boundary. Otherwise wait for the TUI to become idle, then read the terminal state. Save `next_cursor` for incremental reads.
+4. Wait for idle and read output:
 
 ```text
 <bridge> wait --session <session> --for tui-idle --timeout-ms 300000
 <bridge> read --session <session> --cursor 0 --limit 4096 --wait-ms 5000
 ```
 
-5. Inspect the Session JSON fields `activity`, `hook_event`, `tool_name`, and `waiting_reason` after `create`, `list`, or `show`. If `blocked_reason` is present, inspect `show` and send the exact answer required by the visible prompt. Grok lifecycle Hooks report `ask_user_question` and other recognized interactive waits before terminal-title polling would; routine permission notifications remain record-only, so terminal prompt detection is still authoritative. Do not treat a blocked prompt as completion.
+5. Check `blocked_reason`, `activity`, `hook_event`, `tool_name`, and `waiting_reason`. If blocked, inspect `show` and reply with `send --text`. Refresh long leases with `heartbeat`.
+6. When idle, independently inspect `git status`, `git diff`, and run required checks yourself — never trust worker self-reports alone. Send targeted follow-up fixes via `send --text` in the same session.
+7. Close finished sessions with `close --session <session>` or end all sessions owned by this host conversation with `close-client` (alias `close-codex`).
 
-Every identified RPC refreshes the current Codex lease. If independent inspection or testing will run longer than the configured lease without another Bridge command, issue `<bridge> heartbeat` before and after that work. Do not invent or override `CODEX_THREAD_ID`/`CODEX_SESSION_ID`; use the environment supplied by Codex.
+## WebUI & Human Takeover
 
-6. When the task reaches idle, independently inspect `git status` and `git diff`, then run the repository's required checks. Runtime success, a confident terminal report, or `tui-idle` is not proof that the task passed.
-7. Send focused follow-up evidence through the same PTY session, then repeat `wait`, `read`, and verification. Keep ownership with that session until its bounded task passes or is explicitly abandoned.
-
-```text
-<bridge> send --session <session> --text "Fix only the verified failures and rerun the checks."
-<bridge> wait --session <session> --for tui-idle --timeout-ms 300000
-```
-
-8. Interrupt a stuck turn with `send --interrupt`. Close a session when its task is complete or it is no longer useful, releasing its write lock. At the end of the whole Codex task, run `close-codex` so every Grok created by this Codex identity is cleaned up without affecting other Codex sessions.
-
-```text
-<bridge> close --session <session>
-<bridge> close-codex
-```
-
-There is no fixed session-count limit. Concurrency is determined by useful independent tasks, disjoint write sets, and available machine resources—not an arbitrary session target. Close unused sessions because every live Grok process consumes local resources.
-
-## Delegation Prompt
-
-Draft a compact prompt in the following shape and fill it with task-specific facts rather than generic instructions. Before calling `create`, flatten the draft to one line while retaining the labels; do not pass literal CR or LF characters through `--prompt`.
-
-```text
-Act as the implementation subagent for this bounded task.
-
-Objective:
-<one concrete outcome>
-
-Context:
-<relevant architecture, current behavior, and evidence>
-
-Write scope and locks:
-<files or directories this session may modify; resources no other worker may use concurrently>
-
-Acceptance criteria:
-1. <observable requirement>
-2. <observable requirement>
-
-Required checks:
-<targeted tests, lint, type checks, or builds>
-
-Constraints:
-<repository rules, compatibility requirements, and forbidden actions>
-
-Implement the task, run the required checks, inspect your diff, and report changed files, check results, and remaining risks. Do not commit, push, publish, or modify anything outside the write scope.
-```
-
-The final argument should resemble:
-
-```text
-Objective: <outcome>. Context: <facts>. Write scope and locks: <scope>. Acceptance criteria: (1) <requirement>; (2) <requirement>. Required checks: <checks>. Constraints: <constraints>. Implement, verify, inspect the diff, and report results and risks; do not commit, push, publish, or write outside scope.
-```
-
-## Session WebUI
-
-Use the built-in WebUI only when the user wants a browser overview or manual cleanup:
-
-```text
-<bridge> server ui
-```
-
-The command starts the singleton Runtime if needed and opens its WebUI in the default browser. The page summarizes working, waiting, and completed activity, groups Grok sessions by stable Codex identity while displaying the owner title, and keeps each group collapsible across automatic refreshes. The top-right theme control defaults to the operating-system color scheme and can persist an explicit light or dark choice. Each session card prominently distinguishes active keepalive, disconnected-but-running protection, the exact idle cleanup deadline, and cleanup in progress; orphaned sessions show a locally ticking countdown and the absolute close time. Cards also show the configured lease and grace durations, terminal screen, most recent Hook, active tool, waiting reason, process ID, last-update age, and working directory. After checking the visible terminals, close either one Grok process or every process in that Codex identity group; other groups remain running. Closing the browser tab does nothing to sessions.
-
-The default lease is 120 seconds with a 600-second orphan grace period. While a WebUI `/api/events` WebSocket remains attached, the Runtime refreshes the managed Codex leases every 10 seconds; after the socket disconnects, the normal lease and grace countdown resumes. Only idle or terminal sessions are auto-removed after both periods; working or waiting sessions are never automatically killed merely because Codex disconnected. `GROK_BRIDGE_CODEX_LEASE_SECONDS` and `GROK_BRIDGE_ORPHAN_GRACE_SECONDS` can adjust the policy before the singleton Server starts.
-
-`wait --timeout-ms` controls only how long that RPC blocks before returning `timed_out`; it never closes the Grok process. Automatic process cleanup follows the lease, safe-phase, and orphan-grace rules above.
-
-The default address is `127.0.0.1:47653`. Keep `GROK_BRIDGE_WEB_ADDR` on a loopback address because the WebUI has no user authentication. If the port cannot be bound, JSON CLI and PTY sessions continue to work but `server ui` reports that the WebUI is unavailable.
-
-## Human Takeover
-
-Open the egui terminal only when the user requests an interactive view or manual takeover:
-
-```text
-<bridge> terminal --session <session>
-```
-
-Use `terminal [--cwd <path>] [--prompt <text>] [--model <model>] [--owner <label>] [--always-approve]` to create a session and open it immediately. Closing the window only detaches; use the explicit close action to terminate Grok. The egui terminal is a per-session interactive client, not the session-management panel. Do not use it as the normal Codex automation path because it waits for human interaction and does not return a JSON result.
+- `<bridge> server ui` opens the local WebUI (default `http://127.0.0.1:47654`, configured via `AGENT_BRIDGE_WEB_ADDR`).
+- `<bridge> terminal --session <session>` attaches the egui terminal for manual takeover; closing the window only detaches.
 
 ## Command Rules
 
-- `hooks install|status|uninstall` manages the global Grok lifecycle Hook entries used to distinguish working, waiting, and completed turns. Check `status` before writing; install is idempotent and uninstall preserves unrelated hooks.
-- `server status` never starts the Runtime. Use it before every command family that can auto-start. Run `server start` from a writable user context when the singleton is stopped; `server stop|ui` manages or opens that singleton.
-- `create`, `list`, `show`, `read`, `send`, `write`, `resize`, `wait`, and `close` return JSON and auto-start the Server when needed. Invoke them only after the bootstrap check so the singleton never inherits an unintended sandbox.
-- `heartbeat` refreshes the current Codex lease; `close-codex` closes all sessions attached to the current Codex identity.
-- `read` uses byte cursors; `show` includes `rows`, `cols`, and `screen_ansi_base64` for terminal restoration.
-- `send --text` submits bracketed text with Enter; `write --data-base64` writes exact raw bytes.
-- `wait --for tui-idle` reports recognized prompts through `blocked_reason`; `wait --for exit` waits for process termination.
-- `terminal --session <handle>` attaches the GUI to an existing session. Without `--session`, it creates one first.
-
-Prefer JSON `create/read/wait/show/send` for Codex-driven work. Use `write` and `resize` only when exact terminal bytes or dimensions are required. The Server owns every Grok PTY and in-memory session; the terminal and WebUI are clients. Hooks are a fail-open observation channel and never replace PTY control or add bytes to `read`; a missing Hook must not be treated as task failure. Do not edit the same files concurrently with Grok, expose secrets in prompts, owner labels, or raw input, or assume sessions survive a Server restart. By default the Runtime resolves `grok.exe` on Windows and `grok` on Unix. Use `GROK_BIN` only for a trusted native executable; on Windows do not point it at `.cmd`, `.bat`, or `.ps1` shims. Use `GROK_BRIDGE_ALLOWED_ROOTS` to restrict accepted working directories, and `GROK_BRIDGE_WEB_ADDR` only to select a trusted loopback listener.
+- Required `--worker grok|codex` on `create` and creation-mode `terminal`.
+- `AGENT_BRIDGE_ALLOWED_ROOTS`, `AGENT_BRIDGE_CLIENT_LEASE_SECONDS`, `AGENT_BRIDGE_ORPHAN_GRACE_SECONDS`, `AGENT_BRIDGE_WEB_ADDR` govern policy; `GROK_BIN` / `CODEX_BIN` override worker binaries.
