@@ -215,7 +215,26 @@ function resolveExecutableOnPath(stem) {
   return stem;
 }
 
+export function buildAdhocIssue({ task, title }) {
+  const cleanTask = String(task || '').trim();
+  if (!cleanTask) {
+    throw new Error('--task description cannot be empty');
+  }
+  const firstLine = cleanTask.split(/\r?\n/)[0].trim();
+  const cleanTitle = (String(title || '').trim() || firstLine || 'adhoc task').slice(0, 72);
+  return {
+    number: null,
+    title: cleanTitle,
+    body: cleanTask,
+    comments: [],
+  };
+}
+
 export function buildFixPrompt({ issue, attempt, previousFailure }) {
+  const isAdhoc = issue.number === null || issue.number === undefined;
+  const targetHeader = isAdhoc
+    ? `Ad-hoc Task: ${issue.title}`
+    : `GitHub Issue #${issue.number}: ${issue.title}`;
   const comments = Array.isArray(issue.comments) ? issue.comments : [];
   const formattedComments =
     comments.length === 0
@@ -231,35 +250,43 @@ export function buildFixPrompt({ issue, attempt, previousFailure }) {
     ? `\n## Previous Attempt (${attempt - 1}) Verification Failure\nFix the exact failures below before finishing:\n\`\`\`\n${previousFailure.slice(-4000)}\n\`\`\`\n`
     : '';
 
-  return [
-    `You are an autonomous maintenance worker fixing GitHub Issue #${issue.number} in an isolated git worktree of agent-bridge-rs.`,
+  const lines = [
+    `You are an autonomous maintenance worker handling ${targetHeader} in an isolated git worktree of agent-bridge-rs.`,
     '',
     '## Mandatory First Reads',
     '1. Read `AGENTS.md`, `LESSONS.md`, and `docs/code-standards.md`.',
     '2. Read the relevant `docs/subsystems/*.md` reference sheet(s) before editing.',
     '',
-    `## Target Issue #${issue.number}: ${issue.title}`,
+    `## Target ${targetHeader}`,
     '',
-    '### Issue Body',
+    isAdhoc ? '### Task Description' : '### Issue Body',
     issue.body || '(empty)',
-    '',
-    '### Issue Comments (read all to the end)',
-    formattedComments,
+  ];
+
+  if (!isAdhoc) {
+    lines.push('', '### Issue Comments (read all to the end)', formattedComments);
+  }
+
+  lines.push(
     retrySection,
     '## Strict Rules',
     '- Write a failing regression test FIRST using exact reported bytes/behavior when fixing a bug.',
-    '- Keep changes minimal and scoped strictly to this issue.',
+    '- Keep changes minimal and scoped strictly to this task.',
     '- Do NOT modify `.github/workflows/**`.',
     '- Do NOT run `git commit`, `git push`, `git tag`, or `gh pr create` — the outer loop handles delivery.',
-    '- Run full relevant checks (`cargo fmt --check`, `cargo test --all-targets --locked`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, and `cd webui && npm test && npm run build` if WebUI changed) and summarize what you changed and observed.',
-  ].join('\n');
+    '- Run full relevant checks (`cargo fmt --check`, `cargo test --all-targets --locked`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, and `cd webui && npm test && npm run build` if WebUI changed) and summarize what you changed and observed.'
+  );
+  return lines.join('\n');
 }
 
 export function formatCommitAndPrBody({ issue, summary, checksRun, changedFiles }) {
+  const isAdhoc = issue.number === null || issue.number === undefined;
   const cleanSummary = (summary || '').trim() || 'Implemented minimal fix with regression tests.';
-  const lines = [
-    `Fixes #${issue.number}`,
-    '',
+  const lines = [];
+  if (!isAdhoc) {
+    lines.push(`Fixes #${issue.number}`, '');
+  }
+  lines.push(
     '## Summary',
     cleanSummary,
     '',
@@ -267,8 +294,8 @@ export function formatCommitAndPrBody({ issue, summary, checksRun, changedFiles 
     ...changedFiles.map((f) => `- \`${f}\``),
     '',
     '## Verification Evidence',
-    ...checksRun.map((c) => `- \`${c}\``),
-  ];
+    ...checksRun.map((c) => `- \`${c}\``)
+  );
   return lines.join('\n');
 }
 
@@ -442,6 +469,9 @@ function fetchGitHubSnapshot(rootDir, repo) {
 function parseCliArgs(argv) {
   const options = {
     mode: 'dry-run',
+    modeExplicit: false,
+    task: null,
+    title: null,
     runner: 'codex',
     sandbox: process.platform === 'win32' ? 'danger-full-access' : 'workspace-write',
     model: null,
@@ -454,9 +484,17 @@ function parseCliArgs(argv) {
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--dry-run') options.mode = 'dry-run';
-    else if (arg === '--once') options.mode = 'once';
-    else if (arg === '--loop') options.mode = 'loop';
+    if (arg === '--dry-run') {
+      options.mode = 'dry-run';
+      options.modeExplicit = true;
+    } else if (arg === '--once') {
+      options.mode = 'once';
+      options.modeExplicit = true;
+    } else if (arg === '--loop') {
+      options.mode = 'loop';
+      options.modeExplicit = true;
+    } else if (arg === '--task') options.task = argv[++i];
+    else if (arg === '--title') options.title = argv[++i];
     else if (arg === '--runner') options.runner = argv[++i];
     else if (arg === '--sandbox') options.sandbox = argv[++i];
     else if (arg === '--model') options.model = argv[++i];
@@ -472,20 +510,22 @@ function parseCliArgs(argv) {
           'Usage: node scripts/magpie-loop.mjs [OPTIONS]',
           '',
           'Modes:',
-          '  --dry-run             Inspect ready issues and print selection (default)',
+          '  --dry-run             Inspect ready issues (or preview --task) without changing git/GitHub (default)',
           '  --once                Fix at most one eligible ready issue and open a PR',
           '  --loop                Continuously process ready issues with circuit breaker',
+          '  --task <text>         Run directly from a natural-language task without creating a GitHub Issue',
           '',
           'Options:',
+          '  --title <text>        Optional short title used with --task',
           '  --runner <name>       codex (default) | claude | grok',
           '  --sandbox <mode>      Codex sandbox (default: danger-full-access on Windows, workspace-write on Unix)',
           '  --model <model>       Override worker model',
-          '  --max-retries <n>     Max repair rounds per issue (default: 2)',
+          '  --max-retries <n>     Max repair rounds per task/issue (default: 2)',
           '  --max-issues <n>      Max issues per --loop invocation (default: 3)',
           '  --interval-sec <n>    Sleep seconds between --loop iterations (default: 60)',
           '  --self-review         Run a fresh read-only review pass before creating PR',
           '  --auto-merge          Enable gh pr merge --auto --squash after opening PR',
-          '  --keep-worktree       Preserve .worktrees/issue-<N> after finishing',
+          '  --keep-worktree       Preserve .worktrees/<workId> after finishing',
         ].join('\n')
       );
       process.exit(0);
@@ -493,54 +533,62 @@ function parseCliArgs(argv) {
       throw new Error(`Unknown option: ${arg}`);
     }
   }
+  if (options.task && !options.modeExplicit) {
+    options.mode = 'task';
+  }
   return options;
 }
 
 function processSingleIssue(rootDir, repo, issue, options) {
+  const isAdhoc = issue.number === null || issue.number === undefined;
+  const stamp = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
+  const workId = isAdhoc ? `adhoc-${stamp}` : `issue-${issue.number}`;
   const slug = String(issue.title || 'fix')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
     .slice(0, 32) || 'task';
-  const branch = `fix/issue-${issue.number}-${slug}`;
-  const worktreeDir = join(rootDir, '.worktrees', `issue-${issue.number}`);
-  const stateDir = join(rootDir, '.magpie-loop', `issue-${issue.number}`);
+  const branch = `fix/${workId}-${slug}`;
+  const worktreeDir = join(rootDir, '.worktrees', workId);
+  const stateDir = join(rootDir, '.magpie-loop', workId);
 
   if (existsSync(worktreeDir)) {
     throw new Error(`Worktree already exists (fail-closed): ${worktreeDir}`);
   }
 
-  const hold = detectHoldComment(issue.comments);
-  if (hold.held) {
-    execFileSync(
-      'gh',
-      [
-        'issue',
-        'comment',
-        String(issue.number),
-        '-R',
-        repo,
-        '--body',
-        `Detected hold phrase (\`${hold.matched}\`) in the latest comment. Pausing automated fix and adding \`needs:human\`.`,
-      ],
-      { cwd: rootDir, stdio: 'inherit' }
-    );
-    execFileSync(
-      'gh',
-      [
-        'issue',
-        'edit',
-        String(issue.number),
-        '-R',
-        repo,
-        '--add-label',
-        'needs:human',
-        '--remove-label',
-        'ready',
-      ],
-      { cwd: rootDir, stdio: 'inherit' }
-    );
-    return { status: 'held', issueNumber: issue.number };
+  if (!isAdhoc) {
+    const hold = detectHoldComment(issue.comments);
+    if (hold.held) {
+      execFileSync(
+        'gh',
+        [
+          'issue',
+          'comment',
+          String(issue.number),
+          '-R',
+          repo,
+          '--body',
+          `Detected hold phrase (\`${hold.matched}\`) in the latest comment. Pausing automated fix and adding \`needs:human\`.`,
+        ],
+        { cwd: rootDir, stdio: 'inherit' }
+      );
+      execFileSync(
+        'gh',
+        [
+          'issue',
+          'edit',
+          String(issue.number),
+          '-R',
+          repo,
+          '--add-label',
+          'needs:human',
+          '--remove-label',
+          'ready',
+        ],
+        { cwd: rootDir, stdio: 'inherit' }
+      );
+      return { status: 'held', issueNumber: issue.number };
+    }
   }
 
   mkdirSync(dirname(worktreeDir), { recursive: true });
@@ -551,11 +599,13 @@ function processSingleIssue(rootDir, repo, issue, options) {
     cwd: rootDir,
     stdio: 'inherit',
   });
-  execFileSync(
-    'gh',
-    ['issue', 'edit', String(issue.number), '-R', repo, '--add-label', 'in-progress'],
-    { cwd: rootDir, stdio: 'inherit' }
-  );
+  if (!isAdhoc) {
+    execFileSync(
+      'gh',
+      ['issue', 'edit', String(issue.number), '-R', repo, '--add-label', 'in-progress'],
+      { cwd: rootDir, stdio: 'inherit' }
+    );
+  }
 
   let previousFailure = null;
   let lastSummary = '';
@@ -609,8 +659,9 @@ function processSingleIssue(rootDir, repo, issue, options) {
 
       if (options.selfReview) {
         const reviewFile = join(stateDir, `attempt-${attempt}-review.json`);
+        const targetLabel = isAdhoc ? `Ad-hoc Task: ${issue.title}` : `Issue #${issue.number}: ${issue.title}`;
         const reviewPrompt = [
-          `Review git diff in this worktree for Issue #${issue.number}: ${issue.title}.`,
+          `Review git diff in this worktree for ${targetLabel}.`,
           'Check LESSONS.md and docs/code-standards.md. Output JSON only: {"verdict":"approve"|"request_changes","issues":["..."]}.',
         ].join('\n');
         const reviewRes = invokeWorkerRunner({
@@ -640,7 +691,9 @@ function processSingleIssue(rootDir, repo, issue, options) {
         checksRun: verify.checksRun,
         changedFiles,
       });
-      const commitSubject = `fix: resolve #${issue.number} (${String(issue.title).slice(0, 56)})`;
+      const commitSubject = isAdhoc
+        ? `fix: ${String(issue.title).slice(0, 64)}`
+        : `fix: resolve #${issue.number} (${String(issue.title).slice(0, 56)})`;
       execFileSync('git', ['commit', '-m', commitSubject, '-m', commitBody], {
         cwd: worktreeDir,
         stdio: 'inherit',
@@ -662,44 +715,49 @@ function processSingleIssue(rootDir, repo, issue, options) {
         });
       }
 
-      execFileSync(
-        'gh',
-        ['issue', 'edit', String(issue.number), '-R', repo, '--remove-label', 'in-progress'],
-        { cwd: rootDir, stdio: 'inherit' }
-      );
-      return { status: 'pr_created', issueNumber: issue.number, prUrl };
+      if (!isAdhoc) {
+        execFileSync(
+          'gh',
+          ['issue', 'edit', String(issue.number), '-R', repo, '--remove-label', 'in-progress'],
+          { cwd: rootDir, stdio: 'inherit' }
+        );
+      }
+      return { status: 'pr_created', issueNumber: issue.number, workId, prUrl };
     }
 
     // Budget exhausted -> fail-closed escalation.
-    execFileSync(
-      'gh',
-      [
-        'issue',
-        'comment',
-        String(issue.number),
-        '-R',
-        repo,
-        '--body',
-        `Automated \`magpie-loop\` paused after ${options.maxRetries} attempt(s) with verification failure:\n\`\`\`\n${String(previousFailure || 'unknown error').slice(-2500)}\n\`\`\``,
-      ],
-      { cwd: rootDir, stdio: 'inherit' }
-    );
-    execFileSync(
-      'gh',
-      [
-        'issue',
-        'edit',
-        String(issue.number),
-        '-R',
-        repo,
-        '--add-label',
-        'needs:human',
-        '--remove-label',
-        'in-progress',
-      ],
-      { cwd: rootDir, stdio: 'inherit' }
-    );
-    return { status: 'needs_human', issueNumber: issue.number, error: previousFailure };
+    if (!isAdhoc) {
+      execFileSync(
+        'gh',
+        [
+          'issue',
+          'comment',
+          String(issue.number),
+          '-R',
+          repo,
+          '--body',
+          `Automated \`magpie-loop\` paused after ${options.maxRetries} attempt(s) with verification failure:\n\`\`\`\n${String(previousFailure || 'unknown error').slice(-2500)}\n\`\`\``,
+        ],
+        { cwd: rootDir, stdio: 'inherit' }
+      );
+      execFileSync(
+        'gh',
+        [
+          'issue',
+          'edit',
+          String(issue.number),
+          '-R',
+          repo,
+          '--add-label',
+          'needs:human',
+          '--remove-label',
+          'in-progress',
+        ],
+        { cwd: rootDir, stdio: 'inherit' }
+      );
+      return { status: 'needs_human', issueNumber: issue.number, error: previousFailure };
+    }
+    return { status: 'failed', workId, error: previousFailure };
   } finally {
     if (!options.keepWorktree && existsSync(worktreeDir)) {
       try {
@@ -720,6 +778,21 @@ async function runMain() {
   const repo = getRepoSlug(rootDir);
 
   if (options.mode === 'dry-run') {
+    if (options.task) {
+      const adhoc = buildAdhocIssue({ task: options.task, title: options.title });
+      console.log(
+        JSON.stringify(
+          {
+            repo,
+            mode: 'adhoc-dry-run',
+            selected: { number: null, title: adhoc.title, body: adhoc.body },
+          },
+          null,
+          2
+        )
+      );
+      return;
+    }
     const { issues, openPrs } = fetchGitHubSnapshot(rootDir, repo);
     const plan = selectNextIssue(issues, openPrs);
     console.log(
@@ -736,6 +809,17 @@ async function runMain() {
         2
       )
     );
+    return;
+  }
+
+  if (options.mode === 'task') {
+    const adhoc = buildAdhocIssue({ task: options.task, title: options.title });
+    console.log(`Running ad-hoc task: ${adhoc.title}`);
+    const result = processSingleIssue(rootDir, repo, adhoc, options);
+    console.log(JSON.stringify(result));
+    if (result.status !== 'pr_created') {
+      process.exit(1);
+    }
     return;
   }
 

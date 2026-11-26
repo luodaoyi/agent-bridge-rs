@@ -13,8 +13,10 @@ import {
   validateManifestsAndHooks,
 } from '../scripts/check-governance.mjs';
 import {
+  buildAdhocIssue,
   buildFixPrompt,
   detectHoldComment,
+  formatCommitAndPrBody,
   selectNextIssue,
   unwrapWindowsCmdShim,
 } from '../scripts/magpie-loop.mjs';
@@ -155,10 +157,30 @@ test('buildFixPrompt embeds all comments and forbidden path constraints', () => 
     attempt: 2,
     previousFailure: 'cargo test failed',
   });
-  assert.match(prompt, /Target Issue #12/);
+  assert.match(prompt, /GitHub Issue #12/);
   assert.match(prompt, /Confirmed on Windows/);
   assert.match(prompt, /Previous Attempt \(1\) Verification Failure/);
   assert.match(prompt, /Do NOT modify `\.github\/workflows\/\*\*`/);
+});
+
+test('adhoc task mode formats prompt and commit body cleanly without #null', () => {
+  const issue = buildAdhocIssue({
+    task: 'Fix terminal submit timing\nSecond line details',
+    title: 'Fix terminal submit',
+  });
+  assert.equal(issue.number, null);
+  assert.equal(issue.title, 'Fix terminal submit');
+  const prompt = buildFixPrompt({ issue, attempt: 1, previousFailure: null });
+  assert.match(prompt, /Ad-hoc Task: Fix terminal submit/);
+  assert.doesNotMatch(prompt, /#null/);
+  const body = formatCommitAndPrBody({
+    issue,
+    summary: 'Separated paste from submit CR.',
+    checksRun: ['cargo test --all-targets --locked'],
+    changedFiles: ['src/session.rs'],
+  });
+  assert.doesNotMatch(body, /Fixes #/);
+  assert.match(body, /## Verification Evidence/);
 });
 
 test('release-bump computes semver bumps and promotes Unreleased section', () => {

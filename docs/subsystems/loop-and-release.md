@@ -15,7 +15,7 @@
    - `validateDiff`（`--diff-base <ref>`）：对 `src/**/*.rs` 无测试改动（除非 PR 正文含 `No-Test-Reason:`）、`.github/workflows/**` 缺 `Security-Boundary:`、新增行疑似硬编码凭据执行确定性阻断。
 2. **本地修复循环（`scripts/magpie-loop.mjs`）**：
    - **选卡**：仅认领 Open + `ready` 标签、排除 `needs:human` / `in-progress` / 已有 Open PR，且若存在 ` ```json automation ` 块则检查前置 `depends_on` 已关闭；优先 `bug`，按 Issue 编号升序选 1 张。
-   - **安全闸门**：读取 Issue 全部评论至最后一条（识别暂停/暂缓词则挂 `needs:human` 停止）；独占 `.worktrees/issue-<N>`；单卡最多 2 轮修复；禁止触碰 `.github/workflows/**`；必须通过全量 Rust + Launcher + 治理测试；支持 `--dry-run`（只读预览）、`--once`、`--loop`、`--self-review`、`--auto-merge`。
+   - **安全闸门**：读取 Issue 全部评论至最后一条（识别暂停/暂缓词则挂 `needs:human` 停止）；独占 `.worktrees/<workId>`；单卡最多 2 轮修复；禁止触碰 `.github/workflows/**`；必须通过全量 Rust + Launcher + 治理测试；支持 `--dry-run`（只读预览）、`--once`、`--loop`、`--task "<描述>"`（无 Issue 直通模式）、`--self-review`、`--auto-merge`。
 3. **发版与 CI/CD（`scripts/release-bump.mjs` + `.github/workflows/`）**：
    - `release-bump.mjs patch|minor` 先确认 `main` 最新 CI 全绿，再同步所有版本号与 `CHANGELOG.md`、提交并推 `vX.Y.Z` Tag。
    - Tag 推送后 [release.yml](../../.github/workflows/release.yml) 构建 6 平台二进制、打包 `agent-bridge-skill-vX.Y.Z.zip` 与各平台压缩包及 `SHA256SUMS.txt` 并发布 GitHub Release（`publish-npm` 支持 `NPM_TOKEN` 或 OIDC Trusted Publishing）。
