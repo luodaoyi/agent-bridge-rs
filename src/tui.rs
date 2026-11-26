@@ -16,7 +16,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::install::{self, InstallationStatus, Paths};
+use crate::install::{self, InstallTarget, InstallationStatus, Paths};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -56,17 +56,17 @@ impl Language {
     fn strings(&self) -> Strings {
         match self {
             Language::ZhCn => Strings {
-                title: "grok-bridge 安装配置",
-                action_install: "安装 / 更新并自动配置 Grok",
-                action_uninstall: "移除本工具的 Grok Hooks 配置",
+                title: "agent-bridge 安装配置",
+                action_install: "安装 / 更新 Codex Skill + AGY Plugin + 双端 Hooks",
+                action_uninstall: "移除本工具写入的 Grok & Codex Hooks",
                 action_webui: "打开 WebUI",
                 action_language: "语言 / Language",
                 action_exit: "退出",
                 status_section: " 状态 ",
                 status_label: "安装状态",
                 binary_label: "原生 EXE（当前版本）",
-                hooks_label: "Grok Hooks",
-                target_path: "目标路径",
+                hooks_label: "Hooks（Grok / Codex）",
+                target_path: "AGY 插件路径",
                 ready: "已就绪",
                 needs_update: "需更新",
                 configured: "已配置",
@@ -74,10 +74,10 @@ impl Language {
                 actions_section: " 操作 ",
                 result_section: " 结果 ",
                 help_bar: "↑/↓ 或 j/k 选择 · Enter 执行 · q/Esc 退出",
-                msg_initial: "选择第一项并按 Enter，即可完成 EXE 安装和 Grok 配置。",
-                msg_install_success: "配置完成：{}；请在 Grok 中确认信任 Hooks。",
+                msg_initial: "选择第一项并按 Enter，即可部署 Codex Skill、AGY Plugin 与 Hooks。",
+                msg_install_success: "配置完成：{}",
                 msg_install_failed: "配置失败：{}",
-                msg_uninstall_success: "已移除本工具写入的 Grok Hooks 配置。",
+                msg_uninstall_success: "已移除本工具写入的 Grok & Codex Hooks。",
                 msg_uninstall_none: "没有找到本工具写入的 Hooks，未做修改。",
                 msg_uninstall_failed: "移除失败：{}",
                 msg_webui_try: "已尝试打开 WebUI，请检查浏览器。",
@@ -91,17 +91,17 @@ impl Language {
                 err_spawn_xdg: "无法启动 xdg-open",
             },
             Language::En => Strings {
-                title: "grok-bridge Setup",
-                action_install: "Install / Update and Configure Grok",
-                action_uninstall: "Remove Grok Hooks Managed by This Tool",
+                title: "agent-bridge Setup",
+                action_install: "Install / Update Codex Skill + AGY Plugin + Hooks",
+                action_uninstall: "Remove Managed Grok & Codex Hooks",
                 action_webui: "Open WebUI",
                 action_language: "语言 / Language",
                 action_exit: "Exit",
                 status_section: " Status ",
                 status_label: "Installation",
                 binary_label: "Native Binary (Current)",
-                hooks_label: "Grok Hooks",
-                target_path: "Target Path",
+                hooks_label: "Hooks (Grok / Codex)",
+                target_path: "AGY Plugin Binary",
                 ready: "Ready",
                 needs_update: "Update Needed",
                 configured: "Configured",
@@ -109,10 +109,10 @@ impl Language {
                 actions_section: " Actions ",
                 result_section: " Result ",
                 help_bar: "↑/↓ or j/k: Select · Enter: Execute · q/Esc: Exit",
-                msg_initial: "Select the first item and press Enter to install the binary and configure Grok.",
-                msg_install_success: "Configuration complete: {}; please confirm trust in Grok.",
+                msg_initial: "Select the first item and press Enter to install Codex Skill, AGY Plugin, and Hooks.",
+                msg_install_success: "Configuration complete: {}",
                 msg_install_failed: "Configuration failed: {}",
-                msg_uninstall_success: "Removed Grok Hooks managed by this tool.",
+                msg_uninstall_success: "Removed Grok & Codex Hooks managed by this tool.",
                 msg_uninstall_none: "No managed Hooks found; no changes made.",
                 msg_uninstall_failed: "Uninstall failed: {}",
                 msg_webui_try: "Attempted to open WebUI; please check your browser.",
@@ -169,10 +169,10 @@ struct Strings {
 fn lang_config_path() -> Result<PathBuf> {
     let paths = Paths::discover()?;
     let config_dir = paths
-        .skill_root
+        .codex_skill_root
         .parent()
         .ok_or_else(|| anyhow::anyhow!("skill root has no parent"))?;
-    Ok(config_dir.join("grok-bridge-lang.json"))
+    Ok(config_dir.join("agent-bridge-lang.json"))
 }
 
 pub fn run() -> Result<()> {
@@ -195,7 +195,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
     let mut message = String::from(lang.strings().msg_initial);
 
     loop {
-        terminal.draw(|frame| render_menu(frame, &paths, status, selected, &message, lang))?;
+        terminal.draw(|frame| render_menu(frame, &paths, &status, selected, &message, lang))?;
         if !event::poll(Duration::from_millis(250))? {
             continue;
         }
@@ -229,14 +229,14 @@ fn handle_key(
         KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
         KeyCode::Down | KeyCode::Char('j') => *selected = (*selected + 1).min(4),
         KeyCode::Enter if key.kind == KeyEventKind::Press => match *selected {
-            0 => match install::apply() {
+            0 => match install::apply(InstallTarget::All) {
                 Ok(result) => {
                     *status = install::status(paths)?;
                     *message = s.msg_install_success.replace("{}", &result.display());
                 }
                 Err(error) => *message = s.msg_install_failed.replace("{}", &format!("{error:#}")),
             },
-            1 => match install::uninstall() {
+            1 => match install::uninstall(InstallTarget::All) {
                 Ok(true) => {
                     *status = install::status(paths)?;
                     *message = s.msg_uninstall_success.to_string();
@@ -267,7 +267,7 @@ fn handle_key(
 fn render_menu(
     frame: &mut Frame,
     paths: &Paths,
-    status: InstallationStatus,
+    status: &InstallationStatus,
     selected: usize,
     message: &str,
     lang: Language,
@@ -278,7 +278,7 @@ fn render_menu(
         .margin(2)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(6),
+            Constraint::Length(7),
             Constraint::Length(9),
             Constraint::Min(4),
             Constraint::Length(2),
@@ -295,11 +295,24 @@ fn render_menu(
         .block(Block::default().borders(Borders::ALL));
     frame.render_widget(title, areas[0]);
 
-    let status_text = vec![
+    let hooks_summary = format!(
+        "Grok: {} · Codex: {}",
+        if status.grok_hooks_configured {
+            s.configured
+        } else {
+            s.not_configured
+        },
+        if status.codex_hooks_configured {
+            s.configured
+        } else {
+            s.not_configured
+        }
+    );
+    let mut status_text = vec![
         Line::from(status_line(
             s.status_label,
             status.display(),
-            status.binary_current && status.hooks_configured,
+            status.binary_current && status.hooks_configured(),
         )),
         Line::from(status_line(
             s.binary_label,
@@ -312,19 +325,17 @@ fn render_menu(
         )),
         Line::from(status_line(
             s.hooks_label,
-            if status.hooks_configured {
-                s.configured
-            } else {
-                s.not_configured
-            },
-            status.hooks_configured,
+            &hooks_summary,
+            status.hooks_configured(),
         )),
-        Line::from(format!(
-            "{}：{}",
-            s.target_path,
-            paths.installed_binary.display()
-        )),
+        Line::from(format!("{}：{}", s.target_path, paths.agy_binary.display())),
     ];
+    if let Some(legacy) = &status.legacy_grok_bridge_path {
+        status_text.push(Line::from(Span::styled(
+            format!("提示：发现旧版 {legacy}，可手动删除"),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
     frame.render_widget(
         Paragraph::new(status_text)
             .block(
@@ -442,6 +453,18 @@ impl Drop for RestoreTerminal {
 mod tests {
     use super::*;
 
+    fn empty_status() -> InstallationStatus {
+        InstallationStatus {
+            binary_installed: false,
+            binary_current: false,
+            codex_skill_installed: false,
+            agy_plugin_installed: false,
+            grok_hooks_configured: false,
+            codex_hooks_configured: false,
+            legacy_grok_bridge_path: None,
+        }
+    }
+
     #[test]
     fn default_language_is_zh_cn() {
         let lang = Language::ZhCn;
@@ -475,11 +498,7 @@ mod tests {
         let mut selected = 0;
         let mut message = String::new();
         let paths = Paths::discover().unwrap();
-        let mut status = InstallationStatus {
-            binary_installed: false,
-            binary_current: false,
-            hooks_configured: false,
-        };
+        let mut status = empty_status();
         let mut lang = Language::ZhCn;
 
         let key = KeyEvent::new(KeyCode::Char('q'), event::KeyModifiers::NONE);
@@ -500,11 +519,7 @@ mod tests {
         let mut selected = 0;
         let mut message = String::new();
         let paths = Paths::discover().unwrap();
-        let mut status = InstallationStatus {
-            binary_installed: false,
-            binary_current: false,
-            hooks_configured: false,
-        };
+        let mut status = empty_status();
         let mut lang = Language::ZhCn;
 
         let key = KeyEvent::new(KeyCode::Esc, event::KeyModifiers::NONE);
@@ -525,11 +540,7 @@ mod tests {
         let mut selected = 1;
         let mut message = String::new();
         let paths = Paths::discover().unwrap();
-        let mut status = InstallationStatus {
-            binary_installed: false,
-            binary_current: false,
-            hooks_configured: false,
-        };
+        let mut status = empty_status();
         let mut lang = Language::ZhCn;
 
         let key_up = KeyEvent::new(KeyCode::Up, event::KeyModifiers::NONE);
@@ -586,11 +597,7 @@ mod tests {
         let mut selected = 0;
         let mut message = String::new();
         let paths = Paths::discover().unwrap();
-        let mut status = InstallationStatus {
-            binary_installed: false,
-            binary_current: false,
-            hooks_configured: false,
-        };
+        let mut status = empty_status();
         let mut lang = Language::ZhCn;
 
         let key_up = KeyEvent::new(KeyCode::Up, event::KeyModifiers::NONE);
@@ -623,11 +630,7 @@ mod tests {
         let mut selected = 4;
         let mut message = String::new();
         let paths = Paths::discover().unwrap();
-        let mut status = InstallationStatus {
-            binary_installed: false,
-            binary_current: false,
-            hooks_configured: false,
-        };
+        let mut status = empty_status();
         let mut lang = Language::ZhCn;
 
         let key_down = KeyEvent::new(KeyCode::Down, event::KeyModifiers::NONE);
@@ -660,11 +663,7 @@ mod tests {
         let mut selected = 4;
         let mut message = String::new();
         let paths = Paths::discover().unwrap();
-        let mut status = InstallationStatus {
-            binary_installed: false,
-            binary_current: false,
-            hooks_configured: false,
-        };
+        let mut status = empty_status();
         let mut lang = Language::ZhCn;
 
         let key = KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE);
@@ -688,11 +687,7 @@ mod tests {
         let mut selected = 3;
         let mut message = String::new();
         let paths = Paths::discover().unwrap();
-        let mut status = InstallationStatus {
-            binary_installed: false,
-            binary_current: false,
-            hooks_configured: false,
-        };
+        let mut status = empty_status();
         let mut lang = Language::ZhCn;
 
         let key = KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE);

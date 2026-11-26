@@ -33,8 +33,8 @@ const DEFAULT_FOREGROUND: egui::Color32 = egui::Color32::from_rgb(216, 222, 233)
 const DEFAULT_BACKGROUND: egui::Color32 = egui::Color32::from_rgb(11, 14, 20);
 
 pub(crate) fn run(session: String) -> Result<()> {
-    let title = format!("Grok Terminal - {session}");
-    let app_id = format!("grok-bridge-terminal-{session}");
+    let title = format!("Agent Terminal - {session}");
+    let app_id = format!("agent-bridge-terminal-{session}");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id(app_id)

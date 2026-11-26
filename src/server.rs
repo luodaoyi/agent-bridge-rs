@@ -104,16 +104,16 @@ pub(crate) fn run() -> Result<()> {
     match legacy_runtime_server_probe() {
         LegacyProbe::Active => {
             eprintln!(
-                "grok-bridge server: an older Runtime is still running on the legacy endpoint \
+                "agent-bridge server: an older Runtime is still running on the legacy endpoint \
                  `{}`; exiting so clients keep using it. Stop that Runtime (close its terminal \
-                 or press Ctrl-C, or kill the grok-bridge process) and start this version again.",
+                 or press Ctrl-C, or kill the agent-bridge process) and start this version again.",
                 crate::transport::runtime_identity().to_string_lossy()
             );
             return Ok(());
         }
         LegacyProbe::Uncertain(error) => {
             eprintln!(
-                "grok-bridge server: cannot determine whether an older Runtime still owns the \
+                "agent-bridge server: cannot determine whether an older Runtime still owns the \
                  legacy endpoint `{}` (probe failed: {error}); exiting rather than risk a second \
                  Runtime. Stop the older Runtime, or if none is running remove or repair the \
                  stale legacy endpoint, then start this version again.",
@@ -186,7 +186,7 @@ pub(crate) fn run() -> Result<()> {
                 if state.stopping.load(Ordering::Acquire) {
                     break;
                 }
-                eprintln!("grok-bridge server: failed to accept client: {error}");
+                eprintln!("agent-bridge server: failed to accept client: {error}");
                 continue;
             }
         };
@@ -425,7 +425,7 @@ fn handle_connection(stream: Stream, state: Arc<RuntimeState>) {
             // oversized). Record the bounded error and close; there is no
             // request to answer and writing would only wait another write
             // deadline on a peer that is not reading.
-            eprintln!("grok-bridge server: IPC request read failed: {error:#}");
+            eprintln!("agent-bridge server: IPC request read failed: {error:#}");
             return;
         }
     };
@@ -443,8 +443,9 @@ fn handle_connection(stream: Stream, state: Arc<RuntimeState>) {
     };
 
     let request_id = envelope.id;
+    let client_kind = envelope.client_kind;
     let client_session_id = envelope.client_session_id;
-    let refresh_after_response = !matches!(envelope.request, Request::CloseCodex);
+    let refresh_after_response = !matches!(envelope.request, Request::CloseClient);
     let stop_requested = matches!(envelope.request, Request::ServerStop);
     if let Some(client_session_id) = client_session_id.as_deref()
         && let Err(error) = state.host.touch_client(client_session_id)
@@ -454,18 +455,22 @@ fn handle_connection(stream: Stream, state: Arc<RuntimeState>) {
         let _ = write_response(connection.get_mut(), &response);
         return;
     }
-    let (response, stop_after_response) =
-        match dispatch(&state, envelope.request, client_session_id.as_deref()) {
-            Ok((result, stop)) => (ResponseEnvelope::success(request_id, result), stop),
-            Err(error) => (
-                ResponseEnvelope::failure(request_id, "request_failed", format!("{error:#}")),
-                // A ServerStop whose shutdown still failed must wake the accept
-                // loop anyway so the process can exit; otherwise the loop would
-                // wait for a client that never comes while the server holds the
-                // session registry and its process ownership.
-                stop_requested,
-            ),
-        };
+    let (response, stop_after_response) = match dispatch(
+        &state,
+        envelope.request,
+        client_kind,
+        client_session_id.as_deref(),
+    ) {
+        Ok((result, stop)) => (ResponseEnvelope::success(request_id, result), stop),
+        Err(error) => (
+            ResponseEnvelope::failure(request_id, "request_failed", format!("{error:#}")),
+            // A ServerStop whose shutdown still failed must wake the accept
+            // loop anyway so the process can exit; otherwise the loop would
+            // wait for a client that never comes while the server holds the
+            // session registry and its process ownership.
+            stop_requested,
+        ),
+    };
     let wrote_response = write_response(connection.get_mut(), &response).is_ok();
     if wrote_response
         && response.ok
@@ -482,6 +487,7 @@ fn handle_connection(stream: Stream, state: Arc<RuntimeState>) {
 fn dispatch(
     state: &RuntimeState,
     request: Request,
+    client_kind: Option<crate::protocol::ClientKind>,
     client_session_id: Option<&str>,
 ) -> Result<(ResponseResult, bool)> {
     let result = match request {
@@ -493,29 +499,36 @@ fn dispatch(
         }
         Request::Heartbeat => {
             let client_session_id = client_session_id.context(
-                "heartbeat requires CODEX_THREAD_ID or CODEX_SESSION_ID in the client environment",
+                "heartbeat requires CODEX_THREAD_ID, CODEX_SESSION_ID, or ANTIGRAVITY_CONVERSATION_ID in the client environment",
             )?;
             state.host.touch_client(client_session_id)?;
             ResponseResult::Accepted { accepted: true }
         }
-        Request::CloseCodex => {
+        Request::CloseClient => {
             let client_session_id = client_session_id.context(
-                "close_codex requires CODEX_THREAD_ID or CODEX_SESSION_ID in the client environment",
+                "close_client requires CODEX_THREAD_ID, CODEX_SESSION_ID, or ANTIGRAVITY_CONVERSATION_ID in the client environment",
             )?;
             ResponseResult::CloseGroup(state.host.close_client(client_session_id)?)
         }
         Request::Create {
+            worker,
             cwd,
             prompt,
             model,
             owner,
             always_approve,
+            sandbox,
+            dangerously_bypass,
         } => ResponseResult::Session(Box::new(state.host.create(
+            worker,
             &cwd,
             prompt,
             model,
             owner,
             always_approve,
+            sandbox,
+            dangerously_bypass,
+            client_kind,
             client_session_id.map(str::to_owned),
         )?)),
         Request::List => ResponseResult::Sessions {
@@ -566,10 +579,13 @@ fn dispatch(
             accepted: state.host.close(&session)?,
         },
         Request::HookEvent {
+            worker,
             provider_session_id,
             event,
         } => ResponseResult::Accepted {
-            accepted: state.host.apply_hook_event(&provider_session_id, event)?,
+            accepted: state
+                .host
+                .apply_hook_event(worker, &provider_session_id, event)?,
         },
     };
     Ok((result, false))
@@ -583,7 +599,7 @@ fn run_orphan_reaper(state: Arc<RuntimeState>) {
         }
         // Only real close/removal paths notify the WebUI revision bus.
         if let Err(error) = state.host.reap_orphans() {
-            eprintln!("grok-bridge server: orphan cleanup failed: {error:#}");
+            eprintln!("agent-bridge server: orphan cleanup failed: {error:#}");
         }
     }
 }
@@ -620,10 +636,10 @@ impl RuntimeState {
 }
 
 /// Default WebUI listener. Kept loopback-only because the WebUI has no user
-/// authentication; `GROK_BRIDGE_WEB_ADDR` may only select a loopback address.
-const DEFAULT_WEB_ADDR: &str = "127.0.0.1:47653";
+/// authentication; `AGENT_BRIDGE_WEB_ADDR` may only select a loopback address.
+const DEFAULT_WEB_ADDR: &str = "127.0.0.1:47654";
 
-/// Why a `GROK_BRIDGE_WEB_ADDR` value cannot be used as the WebUI listener.
+/// Why a `AGENT_BRIDGE_WEB_ADDR` value cannot be used as the WebUI listener.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WebAddrError {
     /// Not parseable as a literal `IpAddr:port`. Hostnames are never resolved.
@@ -637,13 +653,13 @@ impl fmt::Display for WebAddrError {
         match self {
             WebAddrError::InvalidAddress(value) => write!(
                 formatter,
-                "GROK_BRIDGE_WEB_ADDR {value:?} is not a literal IP address with a port; \
+                "AGENT_BRIDGE_WEB_ADDR {value:?} is not a literal IP address with a port; \
                  the local-only WebUI never resolves hostnames, use a loopback address \
-                 such as 127.0.0.1:47653 or [::1]:47653"
+                 such as 127.0.0.1:47654 or [::1]:47654"
             ),
             WebAddrError::NotLoopback(address) => write!(
                 formatter,
-                "GROK_BRIDGE_WEB_ADDR {address} is not a loopback address; the local-only \
+                "AGENT_BRIDGE_WEB_ADDR {address} is not a loopback address; the local-only \
                  WebUI may only bind to IPv4 127.0.0.0/8 or IPv6 ::1"
             ),
         }
@@ -652,7 +668,7 @@ impl fmt::Display for WebAddrError {
 
 impl std::error::Error for WebAddrError {}
 
-/// Parse a `GROK_BRIDGE_WEB_ADDR` value into a bindable `SocketAddr` and
+/// Parse a `AGENT_BRIDGE_WEB_ADDR` value into a bindable `SocketAddr` and
 /// require it to be loopback (IPv4 127.0.0.0/8 or IPv6 ::1). Pure: never
 /// resolves hostnames, never binds, never reads the environment.
 fn parse_web_addr(value: &str) -> Result<SocketAddr, WebAddrError> {
@@ -663,7 +679,7 @@ fn parse_web_addr(value: &str) -> Result<SocketAddr, WebAddrError> {
     }
 }
 
-/// Shared by `bind_web_ui` and tests; `value` is the raw `GROK_BRIDGE_WEB_ADDR`.
+/// Shared by `bind_web_ui` and tests; `value` is the raw `AGENT_BRIDGE_WEB_ADDR`.
 fn bind_web_ui_from(value: &str) -> Result<Option<TcpListener>> {
     // Parse and validate before binding so a wildcard, LAN, public, hostname,
     // or unresolvable value is a startup error and never reaches `bind`.
@@ -680,7 +696,7 @@ fn classify_web_ui_bind(
         // A legal loopback address whose port is taken only disables the
         // WebUI; JSON CLI and PTY sessions keep running.
         Err(error) if error.kind() == ErrorKind::AddrInUse => {
-            eprintln!("grok-bridge server: WebUI unavailable at {value}: {error}");
+            eprintln!("agent-bridge server: WebUI unavailable at {value}: {error}");
             Ok(None)
         }
         Err(error) => Err(error).with_context(|| format!("failed to bind WebUI at {value}")),
@@ -688,7 +704,7 @@ fn classify_web_ui_bind(
 }
 
 fn bind_web_ui() -> Result<Option<TcpListener>> {
-    let address = env::var("GROK_BRIDGE_WEB_ADDR").unwrap_or_else(|_| DEFAULT_WEB_ADDR.to_owned());
+    let address = env::var("AGENT_BRIDGE_WEB_ADDR").unwrap_or_else(|_| DEFAULT_WEB_ADDR.to_owned());
     bind_web_ui_from(&address)
 }
 
@@ -724,7 +740,7 @@ fn run_web_ui(listener: TcpListener, state: Arc<RuntimeState>) {
                     handle_web_connection(stream, state);
                 });
             }
-            Err(error) => eprintln!("grok-bridge server: WebUI accept failed: {error}"),
+            Err(error) => eprintln!("agent-bridge server: WebUI accept failed: {error}"),
         }
     }
 }
@@ -776,7 +792,7 @@ fn handle_web_connection(mut stream: TcpStream, state: Arc<RuntimeState>) {
         ("GET", "/api/version") => {
             let body = serde_json::to_string(&state.version_checker.status())
                 .unwrap_or_else(|_| {
-                    r#"{"current":"unknown","update_available":false,"release_url":"https://github.com/luodaoyi/grok-bridge-rs/releases/latest"}"#.to_owned()
+                    r#"{"current":"unknown","update_available":false,"release_url":"https://github.com/luodaoyi/agent-bridge-rs/releases/latest"}"#.to_owned()
                 });
             let _ = write_http(&mut stream, "200 OK", "application/json", &body);
         }
@@ -1083,7 +1099,7 @@ fn send_web_events(
         {
             Ok(frames) => frames,
             Err(error) => {
-                eprintln!("grok-bridge server: WebUI events plan failed: {error:#}");
+                eprintln!("agent-bridge server: WebUI events plan failed: {error:#}");
                 return true;
             }
         };
@@ -1092,14 +1108,14 @@ fn send_web_events(
         let payload = match serde_json::to_string(&frame.message) {
             Ok(payload) => payload,
             Err(error) => {
-                eprintln!("grok-bridge server: WebUI events encode failed: {error}");
+                eprintln!("agent-bridge server: WebUI events encode failed: {error}");
                 // Do not commit any remaining planned cursors.
                 return true;
             }
         };
         if payload.len() > WEB_EVENTS_MAX_MESSAGE_BYTES {
             eprintln!(
-                "grok-bridge server: WebUI events frame exceeds {} bytes; leaving cursors uncommitted",
+                "agent-bridge server: WebUI events frame exceeds {} bytes; leaving cursors uncommitted",
                 WEB_EVENTS_MAX_MESSAGE_BYTES
             );
             return true;
@@ -1767,7 +1783,7 @@ fn read_http_request_with_deadline(
         };
         let name = name.trim();
         let value = value.trim();
-        if name.eq_ignore_ascii_case("X-Grok-Bridge-WebUI") && value == "1" {
+        if name.eq_ignore_ascii_case("X-Agent-Bridge-WebUI") && value == "1" {
             bridge_header = true;
         } else if name.eq_ignore_ascii_case("Host") {
             host = Some(value.to_owned());
@@ -2112,7 +2128,7 @@ mod tests {
             value["release_url"]
                 .as_str()
                 .unwrap()
-                .contains("github.com/luodaoyi/grok-bridge-rs/releases")
+                .contains("github.com/luodaoyi/agent-bridge-rs/releases")
         );
     }
 
@@ -2150,7 +2166,7 @@ mod tests {
     fn close_api_distinguishes_missing_timeout_and_internal_failures() {
         // 404: a missing session through the real request path.
         let response = serve_web_request(
-            b"POST /api/sessions/missing/close HTTP/1.1\r\nHost: localhost\r\nX-Grok-Bridge-WebUI: 1\r\n\r\n",
+            b"POST /api/sessions/missing/close HTTP/1.1\r\nHost: localhost\r\nX-Agent-Bridge-WebUI: 1\r\n\r\n",
         );
         let (headers, body) = split_http_response(&response);
         assert!(
@@ -2171,7 +2187,7 @@ mod tests {
             SessionPhase::Running,
             |host| {
                 serve_web_request_with_host(
-                    b"POST /api/sessions/gbt-test/close HTTP/1.1\r\nHost: localhost\r\nX-Grok-Bridge-WebUI: 1\r\n\r\n",
+                    b"POST /api/sessions/gbt-test/close HTTP/1.1\r\nHost: localhost\r\nX-Agent-Bridge-WebUI: 1\r\n\r\n",
                     host,
                 )
             },
@@ -2192,7 +2208,7 @@ mod tests {
         // request path and surfaces as Internal Server Error.
         let host = test_host_with_poisoned_close_lock("provider-failed", SessionPhase::Running);
         let response = serve_web_request_with_host(
-            b"POST /api/sessions/gbt-test/close HTTP/1.1\r\nHost: localhost\r\nX-Grok-Bridge-WebUI: 1\r\n\r\n",
+            b"POST /api/sessions/gbt-test/close HTTP/1.1\r\nHost: localhost\r\nX-Agent-Bridge-WebUI: 1\r\n\r\n",
             host,
         );
         let (headers, body) = split_http_response(&response);
@@ -2211,25 +2227,25 @@ mod tests {
     #[test]
     fn web_origin_requires_matching_loopback_host() {
         assert!(web_origin_allowed(
-            Some("http://127.0.0.1:47653"),
-            Some("127.0.0.1:47653")
+            Some("http://127.0.0.1:47654"),
+            Some("127.0.0.1:47654")
         ));
         assert!(web_origin_allowed(
-            Some("http://localhost:47653"),
-            Some("localhost:47653")
+            Some("http://localhost:47654"),
+            Some("localhost:47654")
         ));
         assert!(!web_origin_allowed(
-            Some("http://evil.example:47653"),
-            Some("127.0.0.1:47653")
+            Some("http://evil.example:47654"),
+            Some("127.0.0.1:47654")
         ));
         assert!(!web_origin_allowed(
-            Some("http://127.0.0.1:47653"),
+            Some("http://127.0.0.1:47654"),
             Some("127.0.0.1:9")
         ));
-        assert!(!web_origin_allowed(None, Some("127.0.0.1:47653")));
+        assert!(!web_origin_allowed(None, Some("127.0.0.1:47654")));
         assert!(!web_origin_allowed(
-            Some("https://127.0.0.1:47653"),
-            Some("127.0.0.1:47653")
+            Some("https://127.0.0.1:47654"),
+            Some("127.0.0.1:47654")
         ));
     }
 
@@ -2237,7 +2253,7 @@ mod tests {
     fn parses_only_loopback_web_addr_as_socket_addr() {
         // Default and other IPv4 127.0.0.0/8 addresses, including port 0.
         for value in [
-            "127.0.0.1:47653",
+            "127.0.0.1:47654",
             "127.0.0.0:80",
             "127.255.255.254:1",
             "127.0.0.1:0",
@@ -2250,7 +2266,7 @@ mod tests {
         }
         // IPv6 ::1 is accepted; this only parses, it never needs the machine
         // to support binding an IPv6 socket.
-        for value in ["[::1]:47653", "[::1]:0"] {
+        for value in ["[::1]:47654", "[::1]:0"] {
             assert_eq!(
                 parse_web_addr(value).unwrap(),
                 value.parse::<SocketAddr>().unwrap(),
@@ -2262,16 +2278,16 @@ mod tests {
     #[test]
     fn rejects_wildcard_lan_and_public_web_addr_before_binding() {
         for value in [
-            "0.0.0.0:47653",            // IPv4 wildcard
-            "[::]:47653",               // IPv6 wildcard
-            "192.168.1.10:47653",       // LAN (RFC 1918)
-            "10.0.0.5:47653",           // LAN (RFC 1918)
-            "172.16.0.1:47653",         // LAN (RFC 1918)
-            "169.254.1.1:47653",        // link-local
-            "8.8.8.8:47653",            // public IPv4
+            "0.0.0.0:47654",            // IPv4 wildcard
+            "[::]:47654",               // IPv6 wildcard
+            "192.168.1.10:47654",       // LAN (RFC 1918)
+            "10.0.0.5:47654",           // LAN (RFC 1918)
+            "172.16.0.1:47654",         // LAN (RFC 1918)
+            "169.254.1.1:47654",        // link-local
+            "8.8.8.8:47654",            // public IPv4
             "1.2.3.4:80",               // public IPv4
-            "[2001:db8::1]:47653",      // public IPv6
-            "[::ffff:127.0.0.1]:47653", // IPv4-mapped IPv6 is not loopback
+            "[2001:db8::1]:47654",      // public IPv6
+            "[::ffff:127.0.0.1]:47654", // IPv4-mapped IPv6 is not loopback
         ] {
             let err = parse_web_addr(value).unwrap_err();
             assert!(
@@ -2293,8 +2309,8 @@ mod tests {
             "127.0.0.1",          // missing port
             "127.0.0.1:notaport", // non-numeric port
             "127.0.0.1:70000",    // port out of range
-            "localhost:47653",    // hostname must not be resolved
-            "myhost.local:47653", // hostname must not be resolved
+            "localhost:47654",    // hostname must not be resolved
+            "myhost.local:47654", // hostname must not be resolved
         ] {
             let err = parse_web_addr(value).unwrap_err();
             assert!(
@@ -2311,9 +2327,9 @@ mod tests {
     fn non_loopback_or_invalid_web_addr_is_a_startup_error() {
         // These must fail before any TcpListener::bind attempt.
         for value in [
-            "0.0.0.0:47653",
-            "8.8.8.8:47653",
-            "localhost:47653",
+            "0.0.0.0:47654",
+            "8.8.8.8:47654",
+            "localhost:47654",
             "garbage",
         ] {
             let err = bind_web_ui_from(value).unwrap_err();
@@ -2340,7 +2356,7 @@ mod tests {
     fn non_addr_in_use_web_bind_errors_remain_startup_errors() {
         for kind in [ErrorKind::PermissionDenied, ErrorKind::AddrNotAvailable] {
             let error = classify_web_ui_bind(
-                "127.0.0.1:47653",
+                "127.0.0.1:47654",
                 Err(io::Error::new(kind, "injected bind failure")),
             )
             .unwrap_err();
@@ -2550,8 +2566,8 @@ mod tests {
             method: "GET".to_owned(),
             path: "/api/events".to_owned(),
             bridge_header: false,
-            host: Some("127.0.0.1:47653".to_owned()),
-            origin: Some("http://127.0.0.1:47653".to_owned()),
+            host: Some("127.0.0.1:47654".to_owned()),
+            origin: Some("http://127.0.0.1:47654".to_owned()),
             upgrade_websocket: false,
             connection_upgrade: false,
             sec_websocket_key: Some("dGhlIHNhbXBsZSBub25jZQ==".to_owned()),
@@ -2586,8 +2602,8 @@ mod tests {
             method: "GET".to_owned(),
             path: "/api/events".to_owned(),
             bridge_header: false,
-            host: Some("127.0.0.1:47653".to_owned()),
-            origin: Some("http://127.0.0.1:47653".to_owned()),
+            host: Some("127.0.0.1:47654".to_owned()),
+            origin: Some("http://127.0.0.1:47654".to_owned()),
             upgrade_websocket: true,
             connection_upgrade: true,
             sec_websocket_key: Some("dGhlIHNhbXBsZSBub25jZQ==".to_owned()),
@@ -2614,8 +2630,8 @@ mod tests {
             method: "GET".to_owned(),
             path: "/api/events".to_owned(),
             bridge_header: false,
-            host: Some("127.0.0.1:47653".to_owned()),
-            origin: Some("http://127.0.0.1:47653".to_owned()),
+            host: Some("127.0.0.1:47654".to_owned()),
+            origin: Some("http://127.0.0.1:47654".to_owned()),
             upgrade_websocket: true,
             connection_upgrade: true,
             sec_websocket_key: Some("YWJj".to_owned()),
@@ -3026,7 +3042,7 @@ mod tests {
     #[test]
     fn client_close_api_reports_an_exact_empty_group() {
         let response = serve_web_request(
-            b"POST /api/clients/codex-thread-42/close HTTP/1.1\r\nHost: localhost\r\nX-Grok-Bridge-WebUI: 1\r\n\r\n",
+            b"POST /api/clients/codex-thread-42/close HTTP/1.1\r\nHost: localhost\r\nX-Agent-Bridge-WebUI: 1\r\n\r\n",
         );
         let (headers, body) = split_http_response(&response);
         assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));

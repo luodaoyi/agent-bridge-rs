@@ -18,10 +18,10 @@ pub(crate) struct InstalledFont {
     pub(crate) latin_path: PathBuf,
 }
 
-const CJK_FONT_NAME: &str = "grok-bridge-cjk";
+const CJK_FONT_NAME: &str = "agent-bridge-cjk";
 const CHINESE_GLYPH_PROBE: &str = "中文状态测试";
 #[cfg(windows)]
-const LATIN_FONT_NAME: &str = "grok-bridge-consolas";
+const LATIN_FONT_NAME: &str = "agent-bridge-consolas";
 #[cfg(windows)]
 const LATIN_GLYPH_PROBE: &str = "Consolas AaZz0123";
 
@@ -62,7 +62,7 @@ pub(crate) fn install_cjk_font(context: &egui::Context) -> Result<InstalledFont>
     }
     if read_errors.is_empty() {
         Err(anyhow!(
-            "no supported system font was found; set GROK_BRIDGE_CJK_FONT"
+            "no supported system font was found; set AGENT_BRIDGE_CJK_FONT"
         ))
     } else {
         Err(anyhow!(read_errors.join("; ")))
@@ -169,12 +169,12 @@ fn font_definitions_with_windows_fonts(
 
 fn cjk_font_candidates() -> Result<Vec<FontCandidate>> {
     let mut paths = Vec::new();
-    if let Some(path) = env::var_os("GROK_BRIDGE_CJK_FONT") {
-        let preferred_face = env::var("GROK_BRIDGE_CJK_FONT_INDEX")
+    if let Some(path) = env::var_os("AGENT_BRIDGE_CJK_FONT") {
+        let preferred_face = env::var("AGENT_BRIDGE_CJK_FONT_INDEX")
             .ok()
             .map(|value| {
                 value.parse::<u32>().map_err(|_| {
-                    anyhow!("GROK_BRIDGE_CJK_FONT_INDEX must be a non-negative integer")
+                    anyhow!("AGENT_BRIDGE_CJK_FONT_INDEX must be a non-negative integer")
                 })
             })
             .transpose()?;

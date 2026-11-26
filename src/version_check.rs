@@ -7,9 +7,9 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 pub(crate) const RELEASES_LATEST_URL: &str =
-    "https://github.com/luodaoyi/grok-bridge-rs/releases/latest";
+    "https://github.com/luodaoyi/agent-bridge-rs/releases/latest";
 const GITHUB_API_LATEST: &str =
-    "https://api.github.com/repos/luodaoyi/grok-bridge-rs/releases/latest";
+    "https://api.github.com/repos/luodaoyi/agent-bridge-rs/releases/latest";
 pub(crate) const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -93,7 +93,7 @@ impl VersionChecker {
                 guard.checked_at_ms = Some(now_millis());
             }
             Err(error) => {
-                eprintln!("grok-bridge server: version check failed: {error:#}");
+                eprintln!("agent-bridge server: version check failed: {error:#}");
                 let mut guard = self.inner.lock().unwrap_or_else(|error| error.into_inner());
                 guard.checked_at_ms = Some(now_millis());
             }
@@ -139,10 +139,10 @@ pub(crate) fn is_outdated(current: &str, latest: &str) -> bool {
 
 fn fetch_latest_release() -> Result<LatestRelease> {
     if env_disabled() {
-        bail!("version check disabled by GROK_BRIDGE_DISABLE_UPDATE_CHECK");
+        bail!("version check disabled by AGENT_BRIDGE_DISABLE_UPDATE_CHECK");
     }
     let response = ureq::get(GITHUB_API_LATEST)
-        .set("User-Agent", "grok-bridge")
+        .set("User-Agent", "agent-bridge")
         .set("Accept", "application/vnd.github+json")
         .timeout(HTTP_TIMEOUT)
         .call()
@@ -155,7 +155,7 @@ fn fetch_latest_release() -> Result<LatestRelease> {
 
 fn env_disabled() -> bool {
     matches!(
-        std::env::var("GROK_BRIDGE_DISABLE_UPDATE_CHECK").as_deref(),
+        std::env::var("AGENT_BRIDGE_DISABLE_UPDATE_CHECK").as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
     )
 }
