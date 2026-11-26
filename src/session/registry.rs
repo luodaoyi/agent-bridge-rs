@@ -634,7 +634,16 @@ impl SessionHost {
                 .registry
                 .lock()
                 .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?;
-            registry.clients.remove(client_session_id);
+            let mut has_sessions = false;
+            for session in registry.sessions.values() {
+                if session.has_client(client_session_id)? {
+                    has_sessions = true;
+                    break;
+                }
+            }
+            if !has_sessions {
+                registry.clients.remove(client_session_id);
+            }
             drop(registry);
             // The client lease map changed after apply_close_outcomes already
             // notified; wake the WebUI again so it observes the removal.
@@ -651,6 +660,7 @@ impl SessionHost {
 
     pub(crate) fn reap_orphans(&self) -> Result<CloseGroupResult> {
         let now = now_millis();
+        let mut failures = Vec::new();
         let candidates = {
             let registry = self
                 .registry
@@ -658,29 +668,39 @@ impl SessionHost {
                 .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?;
             let mut sessions = Vec::new();
             for (handle, session) in &registry.sessions {
-                if session.claim_orphan_cleanup(now)? {
-                    sessions.push((handle.clone(), Arc::clone(session)));
+                match session.claim_orphan_cleanup(now) {
+                    Ok(true) => sessions.push((handle.clone(), Arc::clone(session))),
+                    Ok(false) => {}
+                    Err(error) => failures.push(format!("{handle}: {error}")),
                 }
             }
             sessions
         };
 
         let mut sessions = Vec::new();
-        for (handle, session) in candidates {
-            let committed = {
-                let registry = self
-                    .registry
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?;
-                let still_registered = registry
-                    .sessions
-                    .get(&handle)
-                    .is_some_and(|current| Arc::ptr_eq(current, &session));
-                still_registered && session.commit_orphan_cleanup(now_millis())?
+        for (handle, session) in &candidates {
+            let registry = match self.registry.lock() {
+                Ok(registry) => registry,
+                Err(_) => {
+                    failures.push("session registry lock was poisoned".to_owned());
+                    break;
+                }
             };
-            if committed {
-                sessions.push((handle, session));
+            let still_registered = registry
+                .sessions
+                .get(handle)
+                .is_some_and(|current| Arc::ptr_eq(current, session));
+            if still_registered {
+                match session.commit_orphan_cleanup(now_millis()) {
+                    Ok(true) => sessions.push((handle.clone(), Arc::clone(session))),
+                    Ok(false) => {}
+                    Err(error) => failures.push(format!("{handle}: {error}")),
+                }
             }
+        }
+        // Release this sweep's provisional claims even after a commit error.
+        for (_, session) in &candidates {
+            session.cancel_uncommitted_cleanup_locked();
         }
         if !sessions.is_empty() {
             // Surface ClientLeaseState::Closing only after the final lease and
@@ -689,7 +709,8 @@ impl SessionHost {
         }
         let outcomes =
             self.run_close_group(sessions, default_group_deadline(), GROUP_CLOSE_WORKERS)?;
-        let (result, not_closed) = self.apply_close_outcomes(outcomes)?;
+        let (mut result, not_closed) = self.apply_close_outcomes(outcomes)?;
+        result.failures.extend(failures);
         // Timed-out or failed orphans stay registered so the next reaper tick
         // can claim and retry them from observed state.
         for (_, session) in not_closed {

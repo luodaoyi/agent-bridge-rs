@@ -964,6 +964,11 @@ impl Session {
     /// probe so the escalation loop can skip the expensive all-zombie scan
     /// until its final confirmation window.
     fn probe_scope(&self, stable_verification: bool) -> ScopeAlive {
+        // Metadata-only fixtures own no OS scope and must never probe or signal one.
+        #[cfg(test)]
+        if self.scope_id == 0 {
+            return ScopeAlive::Gone;
+        }
         #[cfg(unix)]
         {
             process_scope_alive(self.scope_id, stable_verification)

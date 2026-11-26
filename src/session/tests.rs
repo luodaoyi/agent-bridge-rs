@@ -228,7 +228,7 @@ fn test_session_with_revision(phase: SessionPhase, host_revision: Arc<HostRevisi
     let (writer_tx, _writer_rx) = sync_channel(1);
     let terminal = phase_is_terminal(phase);
     Session {
-        scope_id: 42,
+        scope_id: 0,
         inner: Mutex::new(SessionInner {
             session: "gbt-test".to_owned(),
             worker: WorkerKind::Grok,
@@ -1464,8 +1464,158 @@ fn close_client_removes_the_lease_and_publishes_a_revision() {
     // A WebUI waiter must observe a revision published after the lease
     // removal, not only the one apply_close_outcomes emitted before it.
     let advanced = host.wait_revision(seen, Duration::from_millis(50));
-    assert_ne!(advanced, seen);
-    assert_ne!(host.revision(), seen);
+    // finalize_now, apply_close_outcomes, then the post-removal notification.
+    assert_eq!(advanced, seen + 3);
+    assert_eq!(host.revision(), seen + 3);
+}
+
+#[test]
+fn close_client_preserves_a_session_created_during_close() {
+    let (host, session) = test_host_with_session(TEST_PROVIDER_SESSION_ID, SessionPhase::Exited);
+    let lease = Arc::new(AtomicU64::new(1_000));
+    {
+        let mut inner = session.inner.lock().unwrap();
+        inner.client_session_id = Some("codex-race".to_owned());
+        inner.client_lease = Some(Arc::clone(&lease));
+    }
+    host.registry
+        .lock()
+        .unwrap()
+        .clients
+        .insert("codex-race".to_owned(), Arc::clone(&lease));
+
+    thread::scope(|scope| {
+        let held = session.test_hold_close_lock();
+        let references = Arc::strong_count(&session);
+        let closing = scope.spawn(|| host.close_client("codex-race").unwrap());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(&session) == references && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        let snapshot_taken = Arc::strong_count(&session) > references;
+        let remaining = Arc::new(test_session_with_revision(
+            SessionPhase::Exited,
+            Arc::clone(&host.revision),
+        ));
+        {
+            let mut inner = remaining.inner.lock().unwrap();
+            inner.session = "gbt-new".to_owned();
+            inner.client_session_id = Some("codex-race".to_owned());
+            inner.client_lease = Some(Arc::clone(&lease));
+        }
+        host.registry
+            .lock()
+            .unwrap()
+            .sessions
+            .insert("gbt-new".to_owned(), remaining);
+        drop(held);
+        let result = closing.join().unwrap();
+        assert!(
+            snapshot_taken,
+            "close must take its snapshot before the new session is inserted"
+        );
+        assert_eq!(result.matched, 1);
+        assert_eq!(result.closed, 1);
+    });
+    {
+        let registry = host.registry.lock().unwrap();
+        assert!(registry.sessions.contains_key("gbt-new"));
+        assert!(Arc::ptr_eq(
+            registry.clients.get("codex-race").unwrap(),
+            &lease
+        ));
+    }
+    assert_eq!(host.close_client("codex-race").unwrap().closed, 1);
+    assert!(
+        !host
+            .registry
+            .lock()
+            .unwrap()
+            .clients
+            .contains_key("codex-race")
+    );
+}
+
+#[test]
+fn reap_orphans_continues_after_claim_and_commit_lock_errors() {
+    let host = SessionHost::new(OrphanPolicy {
+        lease_ms: 1,
+        grace_ms: 1,
+    });
+    {
+        let mut registry = host.registry.lock().unwrap();
+        for handle in ["orphan-a", "orphan-b", "orphan-c"] {
+            let session = Arc::new(test_session(SessionPhase::Exited));
+            {
+                let mut inner = session.inner.lock().unwrap();
+                inner.session = handle.to_owned();
+                inner.client_lease = Some(Arc::new(AtomicU64::new(1)));
+                inner.orphan_policy = host.orphan_policy;
+            }
+            registry.sessions.insert(handle.to_owned(), session);
+        }
+    }
+    // Freeze the map's iteration order: block the second claim while poisoning
+    // the already-claimed first session, and poison the third before claiming.
+    let ordered = host
+        .registry
+        .lock()
+        .unwrap()
+        .sessions
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _inner = ordered[2].inner.lock().unwrap();
+            panic!("poison the claim candidate");
+        }))
+        .is_err()
+    );
+    let result = thread::scope(|scope| {
+        let held = ordered[1].inner.lock().unwrap();
+        let reaping = scope.spawn(|| host.reap_orphans().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ordered[0].cleanup_claimed.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        let claimed = ordered[0].cleanup_claimed.load(Ordering::Acquire);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _inner = ordered[0].inner.lock().unwrap();
+                panic!("poison the commit candidate");
+            }))
+            .is_err()
+        );
+        drop(held);
+        let result = reaping.join().unwrap();
+        assert!(
+            claimed,
+            "the first candidate must be claimed before poisoning"
+        );
+        result
+    });
+    assert_eq!(result.matched, 1);
+    assert_eq!(result.closed, 1);
+    assert_eq!(result.failures.len(), 2);
+    assert!(
+        result
+            .failures
+            .iter()
+            .all(|message| message.contains("session state lock was poisoned"))
+    );
+    assert!(!ordered[0].cleanup_claimed.load(Ordering::Acquire));
+    assert!(!ordered[0].cleanup_committed.load(Ordering::Acquire));
+    assert!(!ordered[2].cleanup_claimed.load(Ordering::Acquire));
+    assert!(!ordered[2].cleanup_committed.load(Ordering::Acquire));
+    let registry = host.registry.lock().unwrap();
+    assert_eq!(registry.sessions.len(), 2);
+    assert!(
+        !registry
+            .sessions
+            .values()
+            .any(|session| Arc::ptr_eq(session, &ordered[1]))
+    );
 }
 
 #[test]
@@ -1976,17 +2126,31 @@ fn web_events_freeze_end_stops_live_cursor_chase() {
     hammer.join().unwrap();
 
     let mut decoded = 0_u64;
+    let mut has_reset = false;
     let mut end = 0_u64;
     for frame in &frames {
         for entry in &frame.message.terminals {
             let raw = BASE64.decode(&entry.data_base64).unwrap();
-            decoded += raw.len() as u64;
+            if entry.reset {
+                has_reset = true;
+            } else {
+                decoded += raw.len() as u64;
+            }
             end = end.max(entry.next_cursor);
         }
     }
-    // Batch is finite: committed end equals total decoded and matches freeze commits.
-    assert!(decoded > 0);
-    assert_eq!(decoded, end);
+    // Reset data is a screen snapshot, so its byte length is not a cursor delta.
+    assert!(decoded > 0 || has_reset);
+    if !has_reset {
+        assert_eq!(decoded, end);
+    }
+    let freeze_end = frames
+        .iter()
+        .flat_map(|frame| &frame.message.sessions)
+        .find(|state| state.session == "gbt-test")
+        .unwrap()
+        .last_cursor;
+    assert_eq!(end, freeze_end);
     let committed = frames
         .iter()
         .filter_map(|frame| frame.cursor_commits.get("gbt-test").copied())
@@ -2244,7 +2408,7 @@ fn windows_process_tree_helper() {
             .expect("ready marker must be written");
             drop(grandchild);
         }
-        "grandchild" => thread::sleep(WINDOWS_PROCESS_TREE_TIMEOUT),
+        "grandchild" => thread::sleep(Duration::from_secs(25)),
         unexpected => panic!("unexpected Windows process-tree helper role: {unexpected}"),
     }
 }
@@ -2401,6 +2565,7 @@ fn windows_shutdown_all_force_kills_the_job_scope_after_a_close_timeout() {
     // terminate the job scope.
     let _held = session.test_hold_close_lock();
 
+    assert_eq!(process_alive(pids[2]), ScopeAlive::Alive);
     host.shutdown_all().unwrap();
     wait_for_windows_process_tree_exit(pids);
     cleanup.disarm();
