@@ -47,8 +47,8 @@ use windows_sys::Win32::{
 };
 
 use crate::protocol::{
-    MAX_FRAME_BYTES, Request, RequestEnvelope, ResponseEnvelope, decode_response, encode_frame,
-    validate_client_session_id,
+    ClientKind, MAX_FRAME_BYTES, Request, RequestEnvelope, ResponseEnvelope, decode_response,
+    encode_frame, validate_client_session_id,
 };
 
 const START_RETRIES: usize = 50;
@@ -79,27 +79,34 @@ const IPC_POLL_MAX: Duration = Duration::from_millis(50);
 const IPC_RESPONSE_SLACK: Duration = Duration::from_secs(60);
 
 pub(crate) fn call(request: Request, auto_start: bool) -> Result<ResponseEnvelope> {
-    call_with_client_session(request, auto_start, current_client_session_id()?)
+    let identity = current_client_identity()?;
+    let (client_kind, client_session_id) = match identity {
+        Some((kind, id)) => (Some(kind), Some(id)),
+        None => (None, None),
+    };
+    call_with_client_session(request, auto_start, client_kind, client_session_id)
 }
 
 pub(crate) fn call_anonymous(request: Request, auto_start: bool) -> Result<ResponseEnvelope> {
-    call_with_client_session(request, auto_start, None)
+    call_with_client_session(request, auto_start, None, None)
 }
 
 fn call_with_client_session(
     request: Request,
     auto_start: bool,
+    client_kind: Option<ClientKind>,
     client_session_id: Option<String>,
 ) -> Result<ResponseEnvelope> {
     let envelope = RequestEnvelope {
         id: next_request_id(),
+        client_kind,
         client_session_id,
         request,
     };
     let stream = match connect() {
         Ok(stream) => stream,
         Err(first_error) if auto_start => {
-            start_detached_server().context("failed to launch the Grok runtime server")?;
+            start_detached_server().context("failed to launch the agent-bridge runtime server")?;
             let mut last_error = first_error;
             for _ in 0..START_RETRIES {
                 thread::sleep(START_RETRY_DELAY);
@@ -116,24 +123,59 @@ fn call_with_client_session(
     call_over_stream(stream, &envelope)
 }
 
-fn current_client_session_id() -> Result<Option<String>> {
-    client_session_id_from(
+fn current_client_identity() -> Result<Option<(ClientKind, String)>> {
+    client_identity_from(
+        env::var("AGENT_BRIDGE_CLIENT_KIND").ok(),
+        env::var("AGENT_BRIDGE_CLIENT_SESSION_ID").ok(),
         env::var("CODEX_THREAD_ID").ok(),
         env::var("CODEX_SESSION_ID").ok(),
+        env::var("ANTIGRAVITY_CONVERSATION_ID").ok(),
+        env::var("ANTIGRAVITY_TRAJECTORY_ID").ok(),
     )
 }
 
-fn client_session_id_from(
-    thread_id: Option<String>,
-    session_id: Option<String>,
-) -> Result<Option<String>> {
-    let value = thread_id
+fn client_identity_from(
+    explicit_kind: Option<String>,
+    explicit_session_id: Option<String>,
+    codex_thread_id: Option<String>,
+    codex_session_id: Option<String>,
+    agy_conversation_id: Option<String>,
+    agy_trajectory_id: Option<String>,
+) -> Result<Option<(ClientKind, String)>> {
+    let non_empty = |value: Option<String>| value.filter(|v| !v.trim().is_empty());
+
+    let parsed_explicit_kind = explicit_kind
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| session_id.filter(|value| !value.trim().is_empty()));
-    if let Some(value) = value.as_deref() {
-        validate_client_session_id(value)?;
-    }
-    Ok(value)
+        .map(|value| value.parse::<ClientKind>())
+        .transpose()?;
+
+    let resolved = non_empty(explicit_session_id)
+        .map(|id| (parsed_explicit_kind.unwrap_or(ClientKind::Unknown), id))
+        .or_else(|| {
+            non_empty(codex_thread_id)
+                .or_else(|| non_empty(codex_session_id))
+                .map(|id| (parsed_explicit_kind.unwrap_or(ClientKind::Codex), id))
+        })
+        .or_else(|| {
+            non_empty(agy_conversation_id)
+                .or_else(|| non_empty(agy_trajectory_id))
+                .map(|id| (parsed_explicit_kind.unwrap_or(ClientKind::Agy), id))
+        });
+
+    let Some((kind, raw_id)) = resolved else {
+        return Ok(None);
+    };
+    validate_client_session_id(&raw_id)?;
+    let scoped = if raw_id.starts_with("codex:")
+        || raw_id.starts_with("agy:")
+        || raw_id.starts_with("unknown:")
+    {
+        raw_id
+    } else {
+        format!("{}:{}", kind.as_str(), raw_id)
+    };
+    validate_client_session_id(&scoped)?;
+    Ok(Some((kind, scoped)))
 }
 
 /// Connect to the Runtime IPC endpoint. On Unix the client tries the current
@@ -589,7 +631,7 @@ pub(crate) fn write_response_with_deadline(
 
 #[cfg(windows)]
 fn start_detached_server() -> Result<()> {
-    let executable = env::current_exe().context("failed to locate grok-bridge executable")?;
+    let executable = env::current_exe().context("failed to locate agent-bridge executable")?;
     let mut application = executable.as_os_str().encode_wide().collect::<Vec<_>>();
     application.push(0);
     let mut command_line = OsString::from(format!("\"{}\" __server", executable.display()))
@@ -627,7 +669,7 @@ fn start_detached_server() -> Result<()> {
 
 #[cfg(unix)]
 fn start_detached_server() -> Result<()> {
-    let executable = env::current_exe().context("failed to locate grok-bridge executable")?;
+    let executable = env::current_exe().context("failed to locate agent-bridge executable")?;
     let mut command = Command::new(executable);
     command
         .arg("__server")
@@ -650,7 +692,7 @@ fn start_detached_server() -> Result<()> {
 
 #[cfg(not(any(windows, unix)))]
 fn start_detached_server() -> Result<()> {
-    let executable = env::current_exe().context("failed to locate grok-bridge executable")?;
+    let executable = env::current_exe().context("failed to locate agent-bridge executable")?;
     Command::new(executable)
         .arg("__server")
         .stdin(Stdio::null())
@@ -675,18 +717,18 @@ fn runtime_identity() -> OsString {
             }
         })
         .collect::<String>();
-    OsString::from(format!("grok-bridge-runtime-v1-{suffix}"))
+    OsString::from(format!("agent-bridge-runtime-v1-{suffix}"))
 }
 
 #[cfg(unix)]
 pub(crate) fn runtime_identity() -> OsString {
     let uid = unsafe { libc::getuid() };
-    OsString::from(format!("grok-bridge-runtime-v1-u{uid}"))
+    OsString::from(format!("agent-bridge-runtime-v1-u{uid}"))
 }
 
 #[cfg(not(any(windows, unix)))]
 fn runtime_identity() -> OsString {
-    OsString::from("grok-bridge-runtime-v1-default")
+    OsString::from("agent-bridge-runtime-v1-default")
 }
 
 /// Owner-only mode for the Runtime IPC directory on Unix.
@@ -1600,26 +1642,68 @@ mod tests {
         assert!(
             first
                 .to_string_lossy()
-                .starts_with("grok-bridge-runtime-v1-")
+                .starts_with("agent-bridge-runtime-v1-")
         );
     }
 
     #[test]
-    fn codex_thread_identity_precedes_the_legacy_session_identity() {
+    fn client_identity_resolves_explicit_codex_and_agy_hosts() {
         assert_eq!(
-            client_session_id_from(Some("thread-42".to_owned()), Some("session-7".to_owned()))
-                .unwrap()
-                .as_deref(),
-            Some("thread-42")
+            client_identity_from(
+                None,
+                None,
+                Some("thread-42".to_owned()),
+                Some("session-7".to_owned()),
+                None,
+                None,
+            )
+            .unwrap(),
+            Some((ClientKind::Codex, "codex:thread-42".to_owned()))
         );
         assert_eq!(
-            client_session_id_from(None, Some("session-7".to_owned()))
-                .unwrap()
-                .as_deref(),
-            Some("session-7")
+            client_identity_from(None, None, None, Some("session-7".to_owned()), None, None)
+                .unwrap(),
+            Some((ClientKind::Codex, "codex:session-7".to_owned()))
         );
-        assert_eq!(client_session_id_from(None, None).unwrap(), None);
-        assert!(client_session_id_from(Some("bad\nidentity".to_owned()), None).is_err());
+        assert_eq!(
+            client_identity_from(
+                None,
+                None,
+                None,
+                None,
+                Some("conv-99".to_owned()),
+                Some("traj-1".to_owned()),
+            )
+            .unwrap(),
+            Some((ClientKind::Agy, "agy:conv-99".to_owned()))
+        );
+        assert_eq!(
+            client_identity_from(
+                Some("agy".to_owned()),
+                Some("custom-1".to_owned()),
+                Some("thread-42".to_owned()),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+            Some((ClientKind::Agy, "agy:custom-1".to_owned()))
+        );
+        assert_eq!(
+            client_identity_from(None, None, None, None, None, None).unwrap(),
+            None
+        );
+        assert!(
+            client_identity_from(
+                None,
+                None,
+                Some("bad\nidentity".to_owned()),
+                None,
+                None,
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]

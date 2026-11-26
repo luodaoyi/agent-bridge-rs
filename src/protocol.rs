@@ -1,4 +1,5 @@
-use std::fmt::Display;
+use std::fmt::{self, Display};
+use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -19,10 +20,126 @@ const MAX_TERMINAL_COLS: u16 = 500;
 const MIN_TERMINAL_ROWS: u16 = 5;
 const MAX_TERMINAL_ROWS: u16 = 200;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WorkerKind {
+    #[default]
+    Grok,
+    Codex,
+}
+
+impl WorkerKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Grok => "grok",
+            Self::Codex => "codex",
+        }
+    }
+}
+
+impl Display for WorkerKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for WorkerKind {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "grok" => Ok(Self::Grok),
+            "codex" => Ok(Self::Codex),
+            other => bail!("unsupported worker: {other}; expected 'grok' or 'codex'"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ClientKind {
+    Codex,
+    Agy,
+    #[default]
+    Unknown,
+}
+
+impl ClientKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Agy => "agy",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl Display for ClientKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ClientKind {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "codex" => Ok(Self::Codex),
+            "agy" | "antigravity" => Ok(Self::Agy),
+            "unknown" => Ok(Self::Unknown),
+            other => {
+                bail!("unsupported client kind: {other}; expected 'codex', 'agy', or 'unknown'")
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum CodexSandboxMode {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl CodexSandboxMode {
+    pub(crate) const fn as_cli_arg(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+}
+
+impl Display for CodexSandboxMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_cli_arg())
+    }
+}
+
+impl FromStr for CodexSandboxMode {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "read-only" => Ok(Self::ReadOnly),
+            "workspace-write" => Ok(Self::WorkspaceWrite),
+            "danger-full-access" => Ok(Self::DangerFullAccess),
+            other => bail!(
+                "unsupported sandbox mode: {other}; expected 'read-only', 'workspace-write', or 'danger-full-access'"
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RequestEnvelope {
     pub(crate) id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) client_kind: Option<ClientKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) client_session_id: Option<String>,
     pub(crate) request: Request,
@@ -39,8 +156,11 @@ pub(crate) enum Request {
     ServerStatus,
     ServerStop,
     Heartbeat,
-    CloseCodex,
+    #[serde(alias = "close_codex")]
+    CloseClient,
     Create {
+        #[serde(default)]
+        worker: WorkerKind,
         cwd: String,
         prompt: Option<String>,
         model: Option<String>,
@@ -48,6 +168,10 @@ pub(crate) enum Request {
         owner: Option<String>,
         #[serde(default)]
         always_approve: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sandbox: Option<CodexSandboxMode>,
+        #[serde(default)]
+        dangerously_bypass: bool,
     },
     List,
     Show {
@@ -81,6 +205,8 @@ pub(crate) enum Request {
         session: String,
     },
     HookEvent {
+        #[serde(default)]
+        worker: WorkerKind,
         provider_session_id: String,
         event: HookEvent,
     },
@@ -98,6 +224,8 @@ pub(crate) enum HookEventKind {
     PostToolUse,
     PostToolUseFailure,
     PermissionDenied,
+    PermissionRequest,
+    Interrupt,
     Notification,
     SubagentStart,
     SubagentStop,
@@ -245,6 +373,10 @@ pub(crate) enum ClientLeaseState {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SessionState {
     pub(crate) session: String,
+    #[serde(default)]
+    pub(crate) worker: WorkerKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) client_kind: Option<ClientKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,6 +398,10 @@ pub(crate) struct SessionState {
     pub(crate) cwd: String,
     pub(crate) model: Option<String>,
     pub(crate) always_approve: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sandbox: Option<CodexSandboxMode>,
+    #[serde(default)]
+    pub(crate) dangerously_bypass: bool,
     pub(crate) process_id: Option<u32>,
     pub(crate) screen: Option<String>,
     pub(crate) rows: u16,
@@ -454,10 +590,16 @@ fn validate_request(request: &Request) -> Result<()> {
         Request::ServerStatus
         | Request::ServerStop
         | Request::Heartbeat
-        | Request::CloseCodex
+        | Request::CloseClient
         | Request::List => Ok(()),
         Request::Create {
-            cwd, model, owner, ..
+            worker,
+            cwd,
+            model,
+            owner,
+            sandbox,
+            dangerously_bypass,
+            ..
         } => {
             if cwd.trim().is_empty() {
                 bail!("cwd must not be empty");
@@ -470,6 +612,9 @@ fn validate_request(request: &Request) -> Result<()> {
             }
             if let Some(owner) = owner.as_deref() {
                 validate_owner(owner)?;
+            }
+            if *worker == WorkerKind::Grok && (sandbox.is_some() || *dangerously_bypass) {
+                bail!("--sandbox and --dangerously-bypass are only supported when --worker codex");
             }
             Ok(())
         }
@@ -504,6 +649,7 @@ fn validate_request(request: &Request) -> Result<()> {
         Request::HookEvent {
             provider_session_id,
             event,
+            ..
         } => {
             validate_provider_session_id(provider_session_id)?;
             validate_hook_event(event)
@@ -713,8 +859,10 @@ mod tests {
     fn hook_request(provider_session_id: &str, event: HookEvent) -> RequestEnvelope {
         RequestEnvelope {
             id: "request-hook".to_owned(),
+            client_kind: None,
             client_session_id: None,
             request: Request::HookEvent {
+                worker: WorkerKind::Grok,
                 provider_session_id: provider_session_id.to_owned(),
                 event,
             },
@@ -729,19 +877,60 @@ mod tests {
     fn request_round_trip_preserves_create_fields() {
         let request = RequestEnvelope {
             id: "request-1".to_owned(),
-            client_session_id: Some("codex-client-42".to_owned()),
+            client_kind: Some(ClientKind::Agy),
+            client_session_id: Some("agy:conv-42".to_owned()),
             request: Request::Create {
+                worker: WorkerKind::Codex,
                 cwd: r"C:\work tree\repo".to_owned(),
                 prompt: Some("fix the terminal".to_owned()),
-                model: Some("grok-code-fast-1".to_owned()),
-                owner: Some("codex-thread-42".to_owned()),
+                model: Some("gpt-5-codex".to_owned()),
+                owner: Some("agy-conv-42".to_owned()),
                 always_approve: true,
+                sandbox: Some(CodexSandboxMode::WorkspaceWrite),
+                dangerously_bypass: false,
             },
         };
 
         let frame = encode_frame(&request).unwrap();
         assert_eq!(frame.last(), Some(&b'\n'));
         assert_eq!(decode_request(&frame).unwrap(), request);
+    }
+
+    #[test]
+    fn rejects_codex_only_flags_for_grok_worker() {
+        let with_sandbox = RequestEnvelope {
+            id: "r1".to_owned(),
+            client_kind: None,
+            client_session_id: None,
+            request: Request::Create {
+                worker: WorkerKind::Grok,
+                cwd: ".".to_owned(),
+                prompt: None,
+                model: None,
+                owner: None,
+                always_approve: false,
+                sandbox: Some(CodexSandboxMode::WorkspaceWrite),
+                dangerously_bypass: false,
+            },
+        };
+        assert!(decode_request(&encode_frame(&with_sandbox).unwrap()).is_err());
+
+        let with_bypass = RequestEnvelope {
+            id: "r2".to_owned(),
+            client_kind: None,
+            client_session_id: None,
+            request: Request::Create {
+                worker: WorkerKind::Grok,
+                cwd: ".".to_owned(),
+                prompt: None,
+                model: None,
+                owner: None,
+                always_approve: false,
+                sandbox: None,
+                dangerously_bypass: true,
+            },
+        };
+        assert!(decode_request(&encode_frame(&with_bypass).unwrap()).is_err());
     }
 
     #[test]
@@ -768,7 +957,7 @@ mod tests {
             Request::ServerStatus,
             Request::ServerStop,
             Request::Heartbeat,
-            Request::CloseCodex,
+            Request::CloseClient,
             Request::List,
             Request::Show {
                 session: "session-1".to_owned(),
@@ -801,6 +990,7 @@ mod tests {
                 session: "session-1".to_owned(),
             },
             Request::HookEvent {
+                worker: WorkerKind::Codex,
                 provider_session_id: valid_provider_session_id().to_owned(),
                 event: hook_event(HookEventKind::Stop),
             },
@@ -809,6 +999,7 @@ mod tests {
         for (index, request) in requests.into_iter().enumerate() {
             let envelope = RequestEnvelope {
                 id: format!("request-{index}"),
+                client_kind: None,
                 client_session_id: None,
                 request,
             };
@@ -817,6 +1008,12 @@ mod tests {
                 envelope
             );
         }
+
+        let legacy_close = br#"{"id":"r-legacy","request":{"method":"close_codex"}}"#;
+        assert_eq!(
+            decode_request(legacy_close).unwrap().request,
+            Request::CloseClient
+        );
     }
 
     #[test]
@@ -856,13 +1053,17 @@ mod tests {
     fn validates_optional_session_owner() {
         let request = |owner: Option<String>| RequestEnvelope {
             id: "request-1".to_owned(),
+            client_kind: None,
             client_session_id: None,
             request: Request::Create {
+                worker: WorkerKind::Grok,
                 cwd: ".".to_owned(),
                 prompt: None,
                 model: None,
                 owner,
                 always_approve: false,
+                sandbox: None,
+                dangerously_bypass: false,
             },
         };
 
@@ -981,6 +1182,7 @@ mod tests {
     fn validates_raw_terminal_writes() {
         let request = |data_base64: String| RequestEnvelope {
             id: "request-1".to_owned(),
+            client_kind: None,
             client_session_id: None,
             request: Request::Write {
                 session: "session-1".to_owned(),
@@ -1005,6 +1207,7 @@ mod tests {
     fn validates_terminal_resize_bounds() {
         let request = |cols, rows| RequestEnvelope {
             id: "request-1".to_owned(),
+            client_kind: None,
             client_session_id: None,
             request: Request::Resize {
                 session: "session-1".to_owned(),
@@ -1111,6 +1314,8 @@ mod tests {
                 "\"post_tool_use_failure\"",
             ),
             (HookEventKind::PermissionDenied, "\"permission_denied\""),
+            (HookEventKind::PermissionRequest, "\"permission_request\""),
+            (HookEventKind::Interrupt, "\"interrupt\""),
             (HookEventKind::Notification, "\"notification\""),
             (HookEventKind::SubagentStart, "\"subagent_start\""),
             (HookEventKind::SubagentStop, "\"subagent_stop\""),
@@ -1138,6 +1343,8 @@ mod tests {
             "r1",
             ResponseResult::Session(Box::new(SessionState {
                 session: "session-1".to_owned(),
+                worker: WorkerKind::Grok,
+                client_kind: Some(ClientKind::Codex),
                 owner: Some("codex-thread-42".to_owned()),
                 client_session_id: Some("codex-client-42".to_owned()),
                 client_state: ClientLeaseState::Connected,
@@ -1151,6 +1358,8 @@ mod tests {
                 cwd: ".".to_owned(),
                 model: None,
                 always_approve: false,
+                sandbox: None,
+                dangerously_bypass: false,
                 process_id: Some(42),
                 screen: Some("screen".to_owned()),
                 rows: 36,
@@ -1190,8 +1399,10 @@ mod tests {
     fn serializes_web_events_message_wire_contract() {
         let session = SessionState {
             session: "gbt-1".to_owned(),
+            worker: WorkerKind::Codex,
+            client_kind: Some(ClientKind::Agy),
             owner: None,
-            client_session_id: Some("codex-1".to_owned()),
+            client_session_id: Some("agy:conv-1".to_owned()),
             client_state: ClientLeaseState::Connected,
             client_lease_ms: Some(120_000),
             orphan_grace_ms: Some(600_000),
@@ -1203,6 +1414,8 @@ mod tests {
             cwd: "/tmp".to_owned(),
             model: None,
             always_approve: false,
+            sandbox: Some(CodexSandboxMode::WorkspaceWrite),
+            dangerously_bypass: false,
             process_id: None,
             screen: Some("hi".to_owned()),
             rows: 36,

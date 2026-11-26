@@ -3,7 +3,6 @@ use std::{
     env,
     ffi::OsString,
     fmt,
-    fs::{self, OpenOptions},
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -19,10 +18,17 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-use crate::protocol::{
-    ClientLeaseState, CloseGroupResult, HookActivity, HookEvent, HookEventKind, MAX_WRITE_BYTES,
-    ReadResult, SessionPhase, SessionState, TerminalStreamEntry, WaitCondition, WaitResult,
-    WebEventsMessage, validate_client_session_id, validate_owner, validate_terminal_size,
+use crate::{
+    protocol::{
+        ClientKind, ClientLeaseState, CloseGroupResult, CodexSandboxMode, HookActivity, HookEvent,
+        HookEventKind, MAX_WRITE_BYTES, ReadResult, SessionPhase, SessionState,
+        TerminalStreamEntry, WaitCondition, WaitResult, WebEventsMessage, WorkerKind,
+        validate_client_session_id, validate_owner, validate_terminal_size,
+    },
+    worker::{
+        self, HookEffect, blocked_reason, ensure_worker_state_dir_writable, hook_effect,
+        phase_from_title, resolve_worker_bin,
+    },
 };
 
 const INITIAL_COLS: u16 = 120;
@@ -82,14 +88,14 @@ impl OrphanPolicy {
     pub(crate) fn from_env() -> Result<Self> {
         Ok(Self {
             lease_ms: parse_duration_env(
-                "GROK_BRIDGE_CODEX_LEASE_SECONDS",
+                "AGENT_BRIDGE_CLIENT_LEASE_SECONDS",
                 DEFAULT_CODEX_LEASE_SECONDS,
                 MIN_CODEX_LEASE_SECONDS,
                 MAX_CODEX_LEASE_SECONDS,
             )?
             .saturating_mul(1_000),
             grace_ms: parse_duration_env(
-                "GROK_BRIDGE_ORPHAN_GRACE_SECONDS",
+                "AGENT_BRIDGE_ORPHAN_GRACE_SECONDS",
                 DEFAULT_ORPHAN_GRACE_SECONDS,
                 MIN_ORPHAN_GRACE_SECONDS,
                 MAX_ORPHAN_GRACE_SECONDS,
@@ -162,6 +168,9 @@ struct SessionRegistry {
     accepting: bool,
     sessions: HashMap<String, Arc<Session>>,
     provider_sessions: HashMap<String, String>,
+    /// Session handles that already received an external provider session binding
+    /// (used for Codex hook dynamic binding fallback when custom env is stripped).
+    external_bound_handles: HashSet<String>,
     clients: HashMap<String, Arc<AtomicU64>>,
     /// Recently closed session handles (handle -> closed_at_ms) kept so a
     /// repeated single close returns an idempotent already-closed result
@@ -180,6 +189,7 @@ impl SessionRegistry {
         }
         let client_session_id = session.client_session_id().ok().flatten();
         self.sessions.remove(handle);
+        self.external_bound_handles.remove(handle);
         self.provider_sessions
             .retain(|_, mapped_handle| mapped_handle != handle);
         if let Some(client_session_id) = client_session_id
@@ -227,6 +237,7 @@ impl SessionHost {
                 accepting: true,
                 sessions: HashMap::new(),
                 provider_sessions: HashMap::new(),
+                external_bound_handles: HashSet::new(),
                 clients: HashMap::new(),
                 closed: HashMap::new(),
             }),
@@ -322,19 +333,27 @@ impl SessionHost {
         Ok(refreshed)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create(
         &self,
+        worker: WorkerKind,
         cwd: &str,
         prompt: Option<String>,
         model: Option<String>,
         owner: Option<String>,
         always_approve: bool,
+        sandbox: Option<CodexSandboxMode>,
+        dangerously_bypass: bool,
+        client_kind: Option<ClientKind>,
         client_session_id: Option<String>,
     ) -> Result<SessionState> {
         let cwd = canonical_directory(Path::new(cwd))?;
         ensure_allowed_root(&cwd)?;
         validate_prompt(prompt.as_deref())?;
         validate_model(model.as_deref())?;
+        if worker == WorkerKind::Grok && (sandbox.is_some() || dangerously_bypass) {
+            bail!("--sandbox and --dangerously-bypass are only supported when --worker codex");
+        }
 
         let mut registry = self
             .registry
@@ -361,18 +380,22 @@ impl SessionHost {
             .provider_sessions
             .contains_key(&provider_session_id)
         {
-            bail!("generated a duplicate Grok provider session ID");
+            bail!("generated a duplicate provider session ID");
         }
         let session = Session::spawn(
             handle.clone(),
             &provider_session_id,
             LaunchConfig {
-                grok_bin: env::var_os("GROK_BIN").unwrap_or_else(default_grok_bin),
+                worker,
+                bin: resolve_worker_bin(worker),
                 cwd,
                 prompt,
                 model,
                 owner,
                 always_approve,
+                sandbox,
+                dangerously_bypass,
+                client_kind,
                 client_session_id,
                 client_lease,
                 orphan_policy: self.orphan_policy,
@@ -559,21 +582,59 @@ impl SessionHost {
 
     pub(crate) fn apply_hook_event(
         &self,
+        worker: WorkerKind,
         provider_session_id: &str,
         event: HookEvent,
     ) -> Result<bool> {
         let session = {
-            let registry = self
+            let mut registry = self
                 .registry
                 .lock()
                 .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?;
-            let Some(handle) = registry.provider_sessions.get(provider_session_id) else {
+            if let Some(handle) = registry.provider_sessions.get(provider_session_id) {
+                let Some(session) = registry.sessions.get(handle) else {
+                    return Ok(false);
+                };
+                if session.worker() != worker {
+                    return Ok(false);
+                }
+                Arc::clone(session)
+            } else if worker == WorkerKind::Codex && event.kind == HookEventKind::SessionStart {
+                let Some(hook_cwd) = event
+                    .cwd
+                    .as_deref()
+                    .and_then(|cwd| canonical_directory(Path::new(cwd)).ok())
+                else {
+                    return Ok(false);
+                };
+                let mut candidates = registry
+                    .sessions
+                    .iter()
+                    .filter(|(handle, session)| {
+                        !registry.external_bound_handles.contains(*handle)
+                            && session.is_active_codex_matching_cwd(&hook_cwd)
+                    })
+                    .filter_map(|(handle, session)| {
+                        session
+                            .created_at_ms()
+                            .ok()
+                            .map(|created| (created, handle.clone(), Arc::clone(session)))
+                    })
+                    .collect::<Vec<_>>();
+                candidates
+                    .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+                let Some((_, matched_handle, matched_session)) = candidates.into_iter().next()
+                else {
+                    return Ok(false);
+                };
+                registry
+                    .provider_sessions
+                    .insert(provider_session_id.to_owned(), matched_handle.clone());
+                registry.external_bound_handles.insert(matched_handle);
+                matched_session
+            } else {
                 return Ok(false);
-            };
-            let Some(session) = registry.sessions.get(handle) else {
-                return Ok(false);
-            };
-            Arc::clone(session)
+            }
         };
         session.apply_hook_event(event)?;
         Ok(true)
@@ -971,12 +1032,16 @@ impl SessionHost {
 }
 
 struct LaunchConfig {
-    grok_bin: OsString,
+    worker: WorkerKind,
+    bin: OsString,
     cwd: PathBuf,
     prompt: Option<String>,
     model: Option<String>,
     owner: Option<String>,
     always_approve: bool,
+    sandbox: Option<CodexSandboxMode>,
+    dangerously_bypass: bool,
+    client_kind: Option<ClientKind>,
     client_session_id: Option<String>,
     client_lease: Option<Arc<AtomicU64>>,
     orphan_policy: OrphanPolicy,
@@ -1132,6 +1197,8 @@ fn default_group_deadline() -> Instant {
 
 struct SessionInner {
     session: String,
+    worker: WorkerKind,
+    client_kind: Option<ClientKind>,
     owner: Option<String>,
     client_session_id: Option<String>,
     client_lease: Option<Arc<AtomicU64>>,
@@ -1141,6 +1208,8 @@ struct SessionInner {
     cwd: String,
     model: Option<String>,
     always_approve: bool,
+    sandbox: Option<CodexSandboxMode>,
+    dangerously_bypass: bool,
     process_id: Option<u32>,
     created_at_ms: u64,
     updated_at_ms: u64,
@@ -1170,20 +1239,6 @@ struct HookState {
     tool_name: Option<String>,
     waiting_reason: Option<String>,
     turn_done: bool,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum HookEffect {
-    Reset,
-    Working {
-        tool_name: Option<String>,
-    },
-    Waiting {
-        tool_name: Option<String>,
-        reason: String,
-    },
-    Done,
-    RecordOnly,
 }
 
 #[derive(Default)]
@@ -1225,6 +1280,30 @@ impl vt100::Callbacks for TitleCallbacks {
 }
 
 impl Session {
+    fn worker(&self) -> WorkerKind {
+        self.inner
+            .lock()
+            .map(|inner| inner.worker)
+            .unwrap_or(WorkerKind::Grok)
+    }
+
+    fn created_at_ms(&self) -> Result<u64> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session state lock was poisoned"))?
+            .created_at_ms)
+    }
+
+    fn is_active_codex_matching_cwd(&self, expected_cwd: &Path) -> bool {
+        let Ok(inner) = self.inner.lock() else {
+            return false;
+        };
+        inner.worker == WorkerKind::Codex
+            && phase_is_active(inner.phase)
+            && normalize_platform_path(PathBuf::from(&inner.cwd)) == expected_cwd
+    }
+
     fn has_owner(&self, owner: &str) -> Result<bool> {
         Ok(self
             .inner
@@ -1260,7 +1339,8 @@ impl Session {
         config: LaunchConfig,
         host_revision: Arc<HostRevision>,
     ) -> Result<Arc<Self>> {
-        let grok_state_dir = ensure_grok_state_dir_writable(&config.cwd, provider_session_id)?;
+        let state_dir =
+            ensure_worker_state_dir_writable(config.worker, &config.cwd, provider_session_id)?;
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -1279,17 +1359,25 @@ impl Session {
             .take_writer()
             .context("failed to take the PTY writer")?;
         #[cfg(not(windows))]
-        let command = build_grok_command(&config, provider_session_id, grok_state_dir.as_deref());
-        #[cfg(windows)]
-        let (command, launch_gate, scope_job) = build_windows_grok_launcher_command(
-            &config,
+        let command = worker::build_worker_command(
+            config.worker,
+            &config.bin,
+            &config.cwd,
+            config.prompt.as_deref(),
+            config.model.as_deref(),
+            config.always_approve,
+            config.sandbox,
+            config.dangerously_bypass,
             provider_session_id,
-            grok_state_dir.as_deref(),
-        )?;
+            state_dir.as_deref(),
+        );
+        #[cfg(windows)]
+        let (command, launch_gate, scope_job) =
+            build_windows_launcher_command(&config, provider_session_id, state_dir.as_deref())?;
         let child = pair
             .slave
             .spawn_command(command)
-            .context("failed to start interactive Grok Build")?;
+            .with_context(|| format!("failed to start interactive {} worker", config.worker))?;
         drop(pair.slave);
         let launcher_process_id = child
             .process_id()
@@ -1303,6 +1391,8 @@ impl Session {
         let session = Arc::new(Self {
             inner: Mutex::new(SessionInner {
                 session: handle,
+                worker: config.worker,
+                client_kind: config.client_kind,
                 owner: config.owner,
                 client_session_id: config.client_session_id,
                 client_lease: config.client_lease,
@@ -1312,6 +1402,8 @@ impl Session {
                 cwd: config.cwd.to_string_lossy().into_owned(),
                 model: config.model,
                 always_approve: config.always_approve,
+                sandbox: config.sandbox,
+                dangerously_bypass: config.dangerously_bypass,
                 process_id: initial_process_id,
                 created_at_ms: now,
                 updated_at_ms: now,
@@ -1367,10 +1459,10 @@ impl Session {
                         .context("failed to assign the Windows launcher to its Job Object")?;
                     launch_gate
                         .signal()
-                        .context("failed to release the Windows Grok launch gate")?;
+                        .context("failed to release the Windows launch gate")?;
                     launch_gate
-                        .wait_for_grok_pid(WINDOWS_LAUNCH_HANDSHAKE_TIMEOUT_MS, Some(handle))
-                        .context("the Windows Grok launcher did not report its process ID")
+                        .wait_for_worker_pid(WINDOWS_LAUNCH_HANDSHAKE_TIMEOUT_MS, Some(handle))
+                        .context("the Windows launcher did not report its process ID")
                 });
             match launch {
                 Ok(process_id) => {
@@ -1791,7 +1883,7 @@ impl Session {
         loop {
             if condition == WaitCondition::TuiIdle {
                 let screen = inner.parser.screen().contents();
-                if let Some(reason) = blocked_reason(&screen) {
+                if let Some(reason) = blocked_reason(inner.worker, &screen) {
                     return Ok(inner.wait_result(condition, false, false, Some(reason)));
                 }
                 if inner.hook.activity == HookActivity::Waiting {
@@ -1799,7 +1891,7 @@ impl Session {
                         .hook
                         .waiting_reason
                         .as_deref()
-                        .unwrap_or("grok-hook-waiting");
+                        .unwrap_or("agent-hook-waiting");
                     return Ok(inner.wait_result(condition, false, false, Some(reason)));
                 }
             }
@@ -2144,6 +2236,7 @@ impl Session {
         let title_updated = std::mem::take(&mut callbacks.title_updated);
         let responses = std::mem::take(&mut callbacks.responses);
         let phase = phase_after_output(
+            inner.worker,
             inner.phase,
             inner.title.as_deref(),
             title_updated,
@@ -2381,6 +2474,8 @@ impl SessionInner {
             self.client_lifecycle(now, cleanup_claimed);
         SessionState {
             session: self.session.clone(),
+            worker: self.worker,
+            client_kind: self.client_kind,
             owner: self.owner.clone(),
             client_session_id: self.client_session_id.clone(),
             client_state,
@@ -2399,6 +2494,8 @@ impl SessionInner {
             cwd: self.cwd.clone(),
             model: self.model.clone(),
             always_approve: self.always_approve,
+            sandbox: self.sandbox,
+            dangerously_bypass: self.dangerously_bypass,
             process_id: self.process_id,
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
@@ -2756,157 +2853,47 @@ fn generate_provider_session_id() -> Result<String> {
     Ok(session_id)
 }
 
-fn hook_effect(event: &HookEvent) -> HookEffect {
-    match event.kind {
-        HookEventKind::SessionStart => HookEffect::Reset,
-        HookEventKind::UserPromptSubmit => HookEffect::Working {
-            tool_name: event.tool_name.clone(),
-        },
-        HookEventKind::PostToolUse
-        | HookEventKind::PostToolUseFailure
-        | HookEventKind::PermissionDenied
-        | HookEventKind::PreCompact
-        | HookEventKind::PostCompact => HookEffect::Working { tool_name: None },
-        HookEventKind::PreToolUse if is_ask_user_question(event.tool_name.as_deref()) => {
-            HookEffect::Waiting {
-                tool_name: event.tool_name.clone(),
-                reason: event
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| "ask_user_question".to_owned()),
-            }
-        }
-        HookEventKind::PreToolUse => HookEffect::Working {
-            tool_name: event.tool_name.clone(),
-        },
-        HookEventKind::Stop | HookEventKind::StopFailure | HookEventKind::SessionEnd => {
-            HookEffect::Done
-        }
-        HookEventKind::Notification => notification_effect(event),
-        HookEventKind::SubagentStart | HookEventKind::SubagentStop => HookEffect::RecordOnly,
-    }
-}
-
-fn is_ask_user_question(tool_name: Option<&str>) -> bool {
-    tool_name.is_some_and(|name| name.eq_ignore_ascii_case("ask_user_question"))
-}
-
-fn notification_effect(event: &HookEvent) -> HookEffect {
-    let notification_type = event
-        .notification_type
-        .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    if notification_type == "permission_prompt" {
-        return HookEffect::RecordOnly;
-    }
-
-    let level = event
-        .level
-        .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    let message = event.message.as_deref().unwrap_or_default();
-    let lower_message = message.to_ascii_lowercase();
-    let waiting = [
-        "permission",
-        "question",
-        "ask_user_question",
-        "elicitation",
-        "elicitation_dialog",
-    ]
-    .iter()
-    .any(|value| notification_type == *value || level == *value)
-        || ["permission", "approval", "approve", "question"]
-            .iter()
-            .any(|value| lower_message.contains(value))
-        || ["权限", "授权", "批准", "问题", "确认"]
-            .iter()
-            .any(|value| message.contains(value));
-    if waiting {
-        let reason = event
-            .message
-            .clone()
-            .or_else(|| event.notification_type.clone())
-            .unwrap_or_else(|| "grok-hook-waiting".to_owned());
-        return HookEffect::Waiting {
-            tool_name: event.tool_name.clone(),
-            reason,
-        };
-    }
-
-    let done = [
-        "idle_prompt",
-        "input_prompt",
-        "input_required",
-        "user_input",
-        "waiting_for_input",
-    ]
-    .iter()
-    .any(|value| notification_type == *value || level == *value)
-        || ["waiting for input", "waiting for your input"]
-            .iter()
-            .any(|value| lower_message.contains(value))
-        || ["请输入", "等待输入", "需要输入"]
-            .iter()
-            .any(|value| message.contains(value));
-    if done {
-        HookEffect::Done
-    } else {
-        HookEffect::RecordOnly
-    }
-}
-
-fn build_grok_command(
-    config: &LaunchConfig,
-    provider_session_id: &str,
-    grok_state_dir: Option<&Path>,
-) -> CommandBuilder {
-    let mut command = CommandBuilder::new(&config.grok_bin);
-    command.cwd(config.cwd.as_os_str());
-    command.env("TERM", "xterm-256color");
-    command.env("COLORTERM", "truecolor");
-    if let Some(grok_state_dir) = grok_state_dir {
-        command.env("GROK_HOME", grok_state_dir.as_os_str());
-    }
-    command.arg("--session-id");
-    command.arg(provider_session_id);
-    if config.always_approve {
-        command.arg("--always-approve");
-    }
-    if let Some(model) = config.model.as_deref() {
-        command.arg("--model");
-        command.arg(model);
-    }
-    if let Some(prompt) = config.prompt.as_deref() {
-        command.arg(prompt);
-    }
-    command
-}
-
 #[cfg(windows)]
-fn build_windows_grok_launcher_command(
+fn build_windows_launcher_command(
     config: &LaunchConfig,
     provider_session_id: &str,
-    grok_state_dir: Option<&Path>,
+    state_dir: Option<&Path>,
 ) -> Result<(CommandBuilder, WindowsLaunchGate, WindowsJob)> {
-    let grok = build_grok_command(config, provider_session_id, grok_state_dir);
+    let worker_cmd = worker::build_worker_command(
+        config.worker,
+        &config.bin,
+        &config.cwd,
+        config.prompt.as_deref(),
+        config.model.as_deref(),
+        config.always_approve,
+        config.sandbox,
+        config.dangerously_bypass,
+        provider_session_id,
+        state_dir,
+    );
     let gate = WindowsLaunchGate::create()?;
-    let job = WindowsJob::create().context("failed to create the Windows Grok Job Object")?;
-    let executable = env::current_exe().context("failed to locate the grok-bridge executable")?;
+    let job = WindowsJob::create().context("failed to create the Windows worker Job Object")?;
+    let executable = env::current_exe().context("failed to locate the agent-bridge executable")?;
     let mut launcher = CommandBuilder::new(executable);
     launcher.cwd(config.cwd.as_os_str());
     launcher.env("TERM", "xterm-256color");
     launcher.env("COLORTERM", "truecolor");
-    if let Some(grok_state_dir) = grok_state_dir {
-        launcher.env("GROK_HOME", grok_state_dir.as_os_str());
+    worker::strip_parent_host_env(&mut launcher);
+    match config.worker {
+        WorkerKind::Grok => {
+            if let Some(state_dir) = state_dir {
+                launcher.env("GROK_HOME", state_dir.as_os_str());
+            }
+        }
+        WorkerKind::Codex => {
+            launcher.env("AGENT_BRIDGE_SESSION_ID", provider_session_id);
+            launcher.env("AGENT_BRIDGE_WORKER", WorkerKind::Codex.as_str());
+        }
     }
     launcher.arg("__windows-job-child");
     launcher.arg(&gate.event_name);
     launcher.arg(&gate.pid_report_name);
-    launcher.args(grok.get_argv());
+    launcher.args(worker_cmd.get_argv());
     Ok((launcher, gate, job))
 }
 
@@ -2919,14 +2906,16 @@ pub(crate) fn run_windows_job_child(mut arguments: Vec<OsString>) -> Result<i32>
     let pid_report_name = arguments.remove(0);
     let program = arguments.remove(0);
     wait_for_windows_launch_gate(&gate_name, WINDOWS_LAUNCH_HANDSHAKE_TIMEOUT_MS)?;
-    let mut child = std::process::Command::new(&program)
-        .args(arguments)
+    let mut command = std::process::Command::new(&program);
+    command.args(arguments);
+    worker::strip_parent_host_env_std(&mut command);
+    let mut child = command
         .spawn()
-        .with_context(|| format!("failed to start gated Grok process {program:?}"))?;
-    report_windows_grok_pid(&pid_report_name, child.id())?;
+        .with_context(|| format!("failed to start gated worker process {program:?}"))?;
+    report_windows_worker_pid(&pid_report_name, child.id())?;
     let status = child
         .wait()
-        .with_context(|| format!("failed to wait for gated Grok process {program:?}"))?;
+        .with_context(|| format!("failed to wait for gated worker process {program:?}"))?;
     Ok(status.code().unwrap_or(1))
 }
 
@@ -3335,8 +3324,8 @@ impl WindowsLaunchGate {
         use windows_sys::Win32::System::Threading::{CreateEventW, CreateSemaphoreW};
 
         let id = generate_provider_session_id()?;
-        let event_name = OsString::from(format!("Local\\grok-bridge-launch-{id}"));
-        let pid_report_name = OsString::from(format!("Local\\grok-bridge-pid-{id}"));
+        let event_name = OsString::from(format!("Local\\agent-bridge-launch-{id}"));
+        let pid_report_name = OsString::from(format!("Local\\agent-bridge-pid-{id}"));
         let wide_event_name = windows_wide_null(&event_name);
         // Manual-reset (bManualReset=TRUE) so SetEvent stays signaled if the
         // ConPTY child reaches WaitForSingleObject after the parent released
@@ -3344,7 +3333,7 @@ impl WindowsLaunchGate {
         let raw_event = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide_event_name.as_ptr()) };
         if raw_event.is_null() {
             return Err(std::io::Error::last_os_error())
-                .context("failed to create the Windows Grok launch event");
+                .context("failed to create the Windows launch event");
         }
         let event = unsafe { OwnedHandle::from_raw_handle(raw_event as _) };
         let wide_pid_report_name = windows_wide_null(&pid_report_name);
@@ -3353,7 +3342,7 @@ impl WindowsLaunchGate {
         };
         if raw_pid_report.is_null() {
             return Err(std::io::Error::last_os_error())
-                .context("failed to create the Windows Grok PID report semaphore");
+                .context("failed to create the Windows PID report semaphore");
         }
         Ok(Self {
             event_name,
@@ -3374,7 +3363,7 @@ impl WindowsLaunchGate {
         }
     }
 
-    fn wait_for_grok_pid(
+    fn wait_for_worker_pid(
         &self,
         timeout_ms: u32,
         launcher: Option<std::os::windows::io::RawHandle>,
@@ -3465,7 +3454,7 @@ fn wait_for_windows_launch_gate(name: &std::ffi::OsStr, timeout_ms: u32) -> Resu
 }
 
 #[cfg(windows)]
-fn report_windows_grok_pid(name: &std::ffi::OsStr, pid: u32) -> Result<()> {
+fn report_windows_worker_pid(name: &std::ffi::OsStr, pid: u32) -> Result<()> {
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
     use windows_sys::Win32::System::Threading::{
         OpenSemaphoreW, ReleaseSemaphore, SEMAPHORE_MODIFY_STATE,
@@ -3607,7 +3596,9 @@ fn completed_phase(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn phase_after_output(
+    worker: WorkerKind,
     current: SessionPhase,
     title: Option<&str>,
     title_updated: bool,
@@ -3618,7 +3609,7 @@ fn phase_after_output(
 ) -> SessionPhase {
     if phase_is_terminal(current) || process_done || failed || shutdown {
         current
-    } else if title_updated && let Some(phase) = phase_from_title(title) {
+    } else if title_updated && let Some(phase) = phase_from_title(worker, title) {
         phase
     } else if hook_activity == HookActivity::Done {
         SessionPhase::Idle
@@ -3674,35 +3665,6 @@ fn wait_satisfied(inner: &mut SessionInner, condition: WaitCondition) -> bool {
     }
 }
 
-fn blocked_reason(screen: &str) -> Option<&'static str> {
-    if screen.contains("Run Grok Build in a project directory?") {
-        Some("grok-project-directory")
-    } else if screen.contains("Type your answer here") || screen.contains("Enter:submit") {
-        Some("grok-interactive-prompt")
-    } else {
-        None
-    }
-}
-
-fn phase_from_title(title: Option<&str>) -> Option<SessionPhase> {
-    let title = title?.trim();
-    let lower = title.to_ascii_lowercase();
-    if title_has_braille_spinner(title) && (lower.ends_with("grok") || lower.contains(" - grok")) {
-        return Some(SessionPhase::Running);
-    }
-    if lower == "grok" || lower.ends_with(" - grok") {
-        return Some(SessionPhase::Idle);
-    }
-    None
-}
-
-fn title_has_braille_spinner(title: &str) -> bool {
-    title
-        .chars()
-        .next()
-        .is_some_and(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
-}
-
 fn phase_is_active(phase: SessionPhase) -> bool {
     matches!(
         phase,
@@ -3750,7 +3712,7 @@ fn canonical_directory(path: &Path) -> Result<PathBuf> {
 }
 
 fn ensure_allowed_root(cwd: &Path) -> Result<()> {
-    let Some(value) = env::var_os("GROK_BRIDGE_ALLOWED_ROOTS") else {
+    let Some(value) = env::var_os("AGENT_BRIDGE_ALLOWED_ROOTS") else {
         return Ok(());
     };
     let mut roots = Vec::new();
@@ -3763,95 +3725,10 @@ fn ensure_allowed_root(cwd: &Path) -> Result<()> {
         Ok(())
     } else {
         bail!(
-            "working directory is outside GROK_BRIDGE_ALLOWED_ROOTS: {}",
+            "working directory is outside AGENT_BRIDGE_ALLOWED_ROOTS: {}",
             cwd.display()
         )
     }
-}
-
-fn ensure_grok_state_dir_writable(
-    cwd: &Path,
-    provider_session_id: &str,
-) -> Result<Option<PathBuf>> {
-    let Some(state_dir) = grok_state_dir(cwd) else {
-        return Ok(None);
-    };
-    ensure_grok_state_dir_writable_at(&state_dir, provider_session_id)?;
-    Ok(Some(state_dir))
-}
-
-fn grok_state_dir(cwd: &Path) -> Option<PathBuf> {
-    let state_dir = grok_state_dir_from(
-        env::var_os("GROK_HOME"),
-        env::var_os("HOME"),
-        env::var_os("USERPROFILE"),
-        cfg!(windows),
-    )?;
-    Some(resolve_state_dir_from_cwd(cwd, state_dir))
-}
-
-fn resolve_state_dir_from_cwd(cwd: &Path, state_dir: PathBuf) -> PathBuf {
-    if state_dir.is_absolute() {
-        state_dir
-    } else {
-        cwd.join(state_dir)
-    }
-}
-
-fn grok_state_dir_from(
-    grok_home: Option<OsString>,
-    home: Option<OsString>,
-    user_profile: Option<OsString>,
-    windows: bool,
-) -> Option<PathBuf> {
-    non_empty_path(grok_home).or_else(|| {
-        let home = if windows {
-            non_empty_path(user_profile).or_else(|| non_empty_path(home))
-        } else {
-            non_empty_path(home).or_else(|| non_empty_path(user_profile))
-        }?;
-        Some(home.join(".grok"))
-    })
-}
-
-fn non_empty_path(value: Option<OsString>) -> Option<PathBuf> {
-    value.filter(|value| !value.is_empty()).map(PathBuf::from)
-}
-
-fn ensure_grok_state_dir_writable_at(state_dir: &Path, provider_session_id: &str) -> Result<()> {
-    let context = format!(
-        "Grok state directory is not writable: {}. The Runtime may have inherited a filesystem sandbox; start grok-bridge server outside that sandbox and retry",
-        state_dir.display()
-    );
-    fs::create_dir_all(state_dir).with_context(|| context.clone())?;
-    let probe_path = state_dir.join(format!(".grok-bridge-write-probe-{provider_session_id}"));
-    let mut created = false;
-    let probe_result = (|| -> std::io::Result<()> {
-        let mut probe = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&probe_path)?;
-        created = true;
-        probe.write_all(b"grok-bridge")?;
-        probe.flush()
-    })();
-    let cleanup_result = if created {
-        match fs::remove_file(&probe_path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }
-    } else {
-        Ok(())
-    };
-    probe_result.with_context(|| context.clone())?;
-    cleanup_result.with_context(|| {
-        format!(
-            "failed to remove Grok state probe: {}",
-            probe_path.display()
-        )
-    })?;
-    Ok(())
 }
 
 #[cfg(windows)]
@@ -3869,14 +3746,6 @@ fn normalize_platform_path(path: PathBuf) -> PathBuf {
 #[cfg(not(windows))]
 fn normalize_platform_path(path: PathBuf) -> PathBuf {
     path
-}
-
-pub(crate) fn default_grok_bin() -> OsString {
-    if cfg!(windows) {
-        OsString::from("grok.exe")
-    } else {
-        OsString::from("grok")
-    }
 }
 
 fn validate_prompt(prompt: Option<&str>) -> Result<()> {
@@ -3921,25 +3790,26 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::fs;
 
     const TEST_PROVIDER_SESSION_ID: &str = "123e4567-e89b-42d3-a456-426614174000";
 
     #[cfg(windows)]
-    const WINDOWS_PROCESS_TREE_ROLE_ENV: &str = "GROK_BRIDGE_TEST_PROCESS_TREE_ROLE";
+    const WINDOWS_PROCESS_TREE_ROLE_ENV: &str = "AGENT_BRIDGE_TEST_PROCESS_TREE_ROLE";
     #[cfg(windows)]
-    const WINDOWS_PROCESS_TREE_DIR_ENV: &str = "GROK_BRIDGE_TEST_PROCESS_TREE_DIR";
+    const WINDOWS_PROCESS_TREE_DIR_ENV: &str = "AGENT_BRIDGE_TEST_PROCESS_TREE_DIR";
     #[cfg(windows)]
-    const WINDOWS_PROCESS_TREE_ROOT_ENV: &str = "GROK_BRIDGE_TEST_PROCESS_TREE_ROOT";
+    const WINDOWS_PROCESS_TREE_ROOT_ENV: &str = "AGENT_BRIDGE_TEST_PROCESS_TREE_ROOT";
     #[cfg(windows)]
-    const WINDOWS_PROCESS_TREE_GATE_ENV: &str = "GROK_BRIDGE_TEST_PROCESS_TREE_GATE";
+    const WINDOWS_PROCESS_TREE_GATE_ENV: &str = "AGENT_BRIDGE_TEST_PROCESS_TREE_GATE";
     #[cfg(windows)]
     const WINDOWS_PROCESS_TREE_HELPER_TEST: &str = "session::tests::windows_process_tree_helper";
     #[cfg(windows)]
-    const WINDOWS_JOB_CHILD_HELPER_ENV: &str = "GROK_BRIDGE_TEST_JOB_CHILD_HELPER";
+    const WINDOWS_JOB_CHILD_HELPER_ENV: &str = "AGENT_BRIDGE_TEST_JOB_CHILD_HELPER";
     #[cfg(windows)]
-    const WINDOWS_JOB_CHILD_GATE_ENV: &str = "GROK_BRIDGE_TEST_JOB_CHILD_GATE";
+    const WINDOWS_JOB_CHILD_GATE_ENV: &str = "AGENT_BRIDGE_TEST_JOB_CHILD_GATE";
     #[cfg(windows)]
-    const WINDOWS_JOB_CHILD_PID_ENV: &str = "GROK_BRIDGE_TEST_JOB_CHILD_PID";
+    const WINDOWS_JOB_CHILD_PID_ENV: &str = "AGENT_BRIDGE_TEST_JOB_CHILD_PID";
     #[cfg(windows)]
     const WINDOWS_JOB_CHILD_HELPER_TEST: &str =
         "session::tests::windows_job_child_handshake_helper";
@@ -4153,6 +4023,8 @@ pub(crate) mod tests {
             scope_id: 42,
             inner: Mutex::new(SessionInner {
                 session: "gbt-test".to_owned(),
+                worker: WorkerKind::Grok,
+                client_kind: None,
                 owner: Some("test-owner".to_owned()),
                 client_session_id: None,
                 client_lease: None,
@@ -4165,6 +4037,8 @@ pub(crate) mod tests {
                 cwd: cwd.to_string_lossy().into_owned(),
                 model: Some("grok-test".to_owned()),
                 always_approve: false,
+                sandbox: None,
+                dangerously_bypass: false,
                 process_id: (!terminal).then_some(42),
                 created_at_ms: 1,
                 updated_at_ms: 1,
@@ -4220,6 +4094,7 @@ pub(crate) mod tests {
                 accepting: true,
                 sessions: HashMap::from([(handle.clone(), Arc::clone(&session))]),
                 provider_sessions: HashMap::from([(provider_session_id.to_owned(), handle)]),
+                external_bound_handles: HashSet::new(),
                 clients: HashMap::new(),
                 closed: HashMap::new(),
             }),
@@ -4271,6 +4146,7 @@ pub(crate) mod tests {
                     TEST_PROVIDER_SESSION_ID.to_owned(),
                     "gbt-test".to_owned(),
                 )]),
+                external_bound_handles: HashSet::new(),
                 clients: HashMap::new(),
                 closed: HashMap::new(),
             }),
@@ -4302,6 +4178,7 @@ pub(crate) mod tests {
                     TEST_PROVIDER_SESSION_ID.to_owned(),
                     "gbt-test".to_owned(),
                 )]),
+                external_bound_handles: HashSet::new(),
                 clients: HashMap::new(),
                 closed: HashMap::new(),
             }),
@@ -4339,6 +4216,7 @@ pub(crate) mod tests {
                 accepting: true,
                 sessions,
                 provider_sessions,
+                external_bound_handles: HashSet::new(),
                 clients: HashMap::new(),
                 closed: HashMap::new(),
             }),
@@ -4354,48 +4232,38 @@ pub(crate) mod tests {
     #[test]
     fn resolves_grok_state_directory_with_platform_precedence() {
         assert_eq!(
-            grok_state_dir_from(
+            worker::worker_state_dir_from(
                 Some(OsString::from("/custom/grok")),
                 Some(OsString::from("/home/test")),
                 Some(OsString::from(r"C:\Users\test")),
                 false,
+                ".grok",
             ),
             Some(PathBuf::from("/custom/grok"))
         );
         assert_eq!(
-            grok_state_dir_from(
+            worker::worker_state_dir_from(
                 None,
                 Some(OsString::from("/home/test")),
                 Some(OsString::from(r"C:\Users\test")),
                 false,
+                ".grok",
             ),
             Some(PathBuf::from("/home/test").join(".grok"))
         );
         assert_eq!(
-            grok_state_dir_from(
+            worker::worker_state_dir_from(
                 None,
                 Some(OsString::from("/home/test")),
                 Some(OsString::from(r"C:\Users\test")),
                 true,
+                ".grok",
             ),
             Some(PathBuf::from(r"C:\Users\test").join(".grok"))
         );
         assert_eq!(
-            grok_state_dir_from(Some(OsString::new()), None, None, false),
+            worker::worker_state_dir_from(Some(OsString::new()), None, None, false, ".grok"),
             None
-        );
-    }
-
-    #[test]
-    fn resolves_relative_grok_home_against_session_working_directory() {
-        let cwd = PathBuf::from("/workspace/project");
-        assert_eq!(
-            resolve_state_dir_from_cwd(&cwd, PathBuf::from(".grok-state")),
-            cwd.join(".grok-state")
-        );
-        assert_eq!(
-            resolve_state_dir_from_cwd(&cwd, PathBuf::from("/custom/grok")),
-            PathBuf::from("/custom/grok")
         );
     }
 
@@ -4403,12 +4271,17 @@ pub(crate) mod tests {
     fn probes_writable_grok_state_directory_and_removes_probe() {
         let root = temporary_test_directory("writable-state");
         let state_dir = root.join("state");
-        ensure_grok_state_dir_writable_at(&state_dir, TEST_PROVIDER_SESSION_ID).unwrap();
+        worker::ensure_worker_state_dir_writable_at(
+            WorkerKind::Grok,
+            &state_dir,
+            TEST_PROVIDER_SESSION_ID,
+        )
+        .unwrap();
         assert!(state_dir.is_dir());
         assert!(
             !state_dir
                 .join(format!(
-                    ".grok-bridge-write-probe-{TEST_PROVIDER_SESSION_ID}"
+                    ".agent-bridge-write-probe-{TEST_PROVIDER_SESSION_ID}"
                 ))
                 .exists()
         );
@@ -4421,9 +4294,13 @@ pub(crate) mod tests {
         fs::create_dir_all(&root).unwrap();
         let state_dir = root.join("state-file");
         fs::write(&state_dir, b"not a directory").unwrap();
-        let error = ensure_grok_state_dir_writable_at(&state_dir, TEST_PROVIDER_SESSION_ID)
-            .unwrap_err()
-            .to_string();
+        let error = worker::ensure_worker_state_dir_writable_at(
+            WorkerKind::Grok,
+            &state_dir,
+            TEST_PROVIDER_SESSION_ID,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("Grok state directory is not writable"));
         assert!(error.contains("filesystem sandbox"));
         fs::remove_dir_all(root).unwrap();
@@ -4434,10 +4311,17 @@ pub(crate) mod tests {
         let root = temporary_test_directory("probe-collision");
         fs::create_dir_all(&root).unwrap();
         let probe_path = root.join(format!(
-            ".grok-bridge-write-probe-{TEST_PROVIDER_SESSION_ID}"
+            ".agent-bridge-write-probe-{TEST_PROVIDER_SESSION_ID}"
         ));
         fs::write(&probe_path, b"existing").unwrap();
-        assert!(ensure_grok_state_dir_writable_at(&root, TEST_PROVIDER_SESSION_ID).is_err());
+        assert!(
+            worker::ensure_worker_state_dir_writable_at(
+                WorkerKind::Grok,
+                &root,
+                TEST_PROVIDER_SESSION_ID
+            )
+            .is_err()
+        );
         assert_eq!(fs::read(&probe_path).unwrap(), b"existing");
         fs::remove_dir_all(root).unwrap();
     }
@@ -4445,26 +4329,33 @@ pub(crate) mod tests {
     #[test]
     fn detects_grok_working_and_idle_titles() {
         assert_eq!(
-            phase_from_title(Some("⠋ - Waiting for response… - grok")),
+            phase_from_title(WorkerKind::Grok, Some("⠋ - Waiting for response… - grok")),
             Some(SessionPhase::Running)
         );
         assert_eq!(
-            phase_from_title(Some("Fix the auth bug - grok")),
+            phase_from_title(WorkerKind::Grok, Some("Fix the auth bug - grok")),
             Some(SessionPhase::Idle)
         );
-        assert_eq!(phase_from_title(Some("grok")), Some(SessionPhase::Idle));
-        assert_eq!(phase_from_title(Some("PowerShell")), None);
+        assert_eq!(
+            phase_from_title(WorkerKind::Grok, Some("grok")),
+            Some(SessionPhase::Idle)
+        );
+        assert_eq!(phase_from_title(WorkerKind::Grok, Some("PowerShell")), None);
     }
 
     #[test]
     fn builds_only_interactive_grok_arguments() {
         let config = LaunchConfig {
-            grok_bin: OsString::from("grok.exe"),
+            worker: WorkerKind::Grok,
+            bin: OsString::from("grok.exe"),
             cwd: PathBuf::from(r"C:\repo"),
             prompt: Some("修复中文".to_owned()),
             model: Some("grok-4".to_owned()),
             owner: None,
             always_approve: true,
+            sandbox: None,
+            dangerously_bypass: false,
+            client_kind: None,
             client_session_id: None,
             client_lease: None,
             orphan_policy: OrphanPolicy {
@@ -4473,7 +4364,18 @@ pub(crate) mod tests {
             },
         };
         let grok_home = PathBuf::from(r"C:\repo\.grok-state");
-        let command = build_grok_command(&config, TEST_PROVIDER_SESSION_ID, Some(&grok_home));
+        let command = worker::build_worker_command(
+            config.worker,
+            &config.bin,
+            &config.cwd,
+            config.prompt.as_deref(),
+            config.model.as_deref(),
+            config.always_approve,
+            config.sandbox,
+            config.dangerously_bypass,
+            TEST_PROVIDER_SESSION_ID,
+            Some(&grok_home),
+        );
         assert_eq!(command.get_env("GROK_BRIDGE_SESSION"), None);
         assert_eq!(command.get_env("GROK_BRIDGE_HOOK_TOKEN"), None);
         assert_eq!(command.get_env("GROK_HOME"), Some(grok_home.as_os_str()));
@@ -4500,14 +4402,18 @@ pub(crate) mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn builds_gated_windows_launcher_before_the_grok_command() {
+    fn builds_gated_windows_launcher_before_the_worker_command() {
         let config = LaunchConfig {
-            grok_bin: OsString::from(r"C:\Program Files\Grok\grok.exe"),
+            worker: WorkerKind::Grok,
+            bin: OsString::from(r"C:\Program Files\Grok\grok.exe"),
             cwd: PathBuf::from(r"C:\repo"),
             prompt: Some("fix it".to_owned()),
             model: Some("grok-4".to_owned()),
             owner: None,
             always_approve: false,
+            sandbox: None,
+            dangerously_bypass: false,
+            client_kind: None,
             client_session_id: None,
             client_lease: None,
             orphan_policy: OrphanPolicy {
@@ -4516,12 +4422,9 @@ pub(crate) mod tests {
             },
         };
         let grok_home = PathBuf::from(r"C:\repo\.grok-state");
-        let (command, gate, job) = build_windows_grok_launcher_command(
-            &config,
-            TEST_PROVIDER_SESSION_ID,
-            Some(&grok_home),
-        )
-        .unwrap();
+        let (command, gate, job) =
+            build_windows_launcher_command(&config, TEST_PROVIDER_SESSION_ID, Some(&grok_home))
+                .unwrap();
         let argv = command.get_argv();
         assert_eq!(PathBuf::from(&argv[0]), env::current_exe().unwrap());
         assert_eq!(argv[1], OsString::from("__windows-job-child"));
@@ -4542,8 +4445,8 @@ pub(crate) mod tests {
     #[test]
     fn launch_gate_reports_the_real_grok_pid_without_a_file_or_shell() {
         let gate = WindowsLaunchGate::create().unwrap();
-        report_windows_grok_pid(&gate.pid_report_name, 1234).unwrap();
-        assert_eq!(gate.wait_for_grok_pid(100, None).unwrap(), 1234);
+        report_windows_worker_pid(&gate.pid_report_name, 1234).unwrap();
+        assert_eq!(gate.wait_for_worker_pid(100, None).unwrap(), 1234);
     }
 
     #[cfg(windows)]
@@ -4638,7 +4541,7 @@ pub(crate) mod tests {
         gate.signal().unwrap();
         let started = Instant::now();
         let pid = gate
-            .wait_for_grok_pid(5_000, child.as_raw_handle())
+            .wait_for_worker_pid(5_000, child.as_raw_handle())
             .expect("ConPTY job-child handshake must report a PID");
         let _ = child.kill();
         assert_ne!(pid, 0);
@@ -4676,7 +4579,7 @@ pub(crate) mod tests {
         job.assign_process(child.as_raw_handle().expect("launcher handle"))
             .unwrap();
         let error = gate
-            .wait_for_grok_pid(200, child.as_raw_handle())
+            .wait_for_worker_pid(200, child.as_raw_handle())
             .unwrap_err();
         assert!(error.to_string().contains("timed out"), "{error:#}");
         job.terminate(TerminationLevel::Kill).unwrap();
@@ -4728,7 +4631,7 @@ pub(crate) mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn wait_for_grok_pid_fails_fast_when_the_launcher_exits() {
+    fn wait_for_worker_pid_fails_fast_when_the_launcher_exits() {
         use std::os::windows::io::AsRawHandle;
         use std::process::{Command, Stdio};
 
@@ -4742,7 +4645,7 @@ pub(crate) mod tests {
             .unwrap();
         let started = Instant::now();
         let error = gate
-            .wait_for_grok_pid(10_000, Some(child.as_raw_handle()))
+            .wait_for_worker_pid(10_000, Some(child.as_raw_handle()))
             .unwrap_err();
         let _ = child.wait();
         assert!(
@@ -4754,7 +4657,7 @@ pub(crate) mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn wait_for_grok_pid_still_reports_when_watching_a_live_launcher() {
+    fn wait_for_worker_pid_still_reports_when_watching_a_live_launcher() {
         use std::os::windows::io::AsRawHandle;
         use std::process::{Command, Stdio};
 
@@ -4766,8 +4669,8 @@ pub(crate) mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        report_windows_grok_pid(&gate.pid_report_name, 1234).unwrap();
-        let pid = gate.wait_for_grok_pid(1_000, Some(child.as_raw_handle()));
+        report_windows_worker_pid(&gate.pid_report_name, 1234).unwrap();
+        let pid = gate.wait_for_worker_pid(1_000, Some(child.as_raw_handle()));
         let _ = child.kill();
         let _ = child.wait();
         assert_eq!(pid.unwrap(), 1234);
@@ -5292,7 +5195,7 @@ pub(crate) mod tests {
         event.message = Some("需要选择".to_owned());
 
         assert!(
-            host.apply_hook_event(TEST_PROVIDER_SESSION_ID, event)
+            host.apply_hook_event(WorkerKind::Grok, TEST_PROVIDER_SESSION_ID, event)
                 .unwrap()
         );
         let web = host.list_web().unwrap().pop().unwrap();
@@ -5307,6 +5210,7 @@ pub(crate) mod tests {
         assert!(
             !host
                 .apply_hook_event(
+                    WorkerKind::Grok,
                     "00000000-0000-4000-8000-000000000000",
                     hook_event(HookEventKind::Stop)
                 )
@@ -5321,7 +5225,11 @@ pub(crate) mod tests {
         assert!(host.close("gbt-test").unwrap());
         assert!(
             !host
-                .apply_hook_event(TEST_PROVIDER_SESSION_ID, hook_event(HookEventKind::Stop))
+                .apply_hook_event(
+                    WorkerKind::Grok,
+                    TEST_PROVIDER_SESSION_ID,
+                    hook_event(HookEventKind::Stop)
+                )
                 .unwrap()
         );
         let registry = host.registry.lock().unwrap();
@@ -5397,6 +5305,7 @@ pub(crate) mod tests {
     fn hook_done_and_waiting_survive_output_without_an_explicit_grok_title() {
         assert_eq!(
             phase_after_output(
+                WorkerKind::Grok,
                 SessionPhase::Running,
                 None,
                 false,
@@ -5409,6 +5318,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             phase_after_output(
+                WorkerKind::Grok,
                 SessionPhase::Running,
                 None,
                 false,
@@ -5421,6 +5331,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             phase_after_output(
+                WorkerKind::Grok,
                 SessionPhase::Idle,
                 Some("⠋ - Waiting for response… - grok"),
                 true,
@@ -5433,6 +5344,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             phase_after_output(
+                WorkerKind::Grok,
                 SessionPhase::Running,
                 Some("grok"),
                 true,
@@ -5603,6 +5515,7 @@ pub(crate) mod tests {
     fn late_output_does_not_revive_a_finished_process() {
         assert_eq!(
             phase_after_output(
+                WorkerKind::Grok,
                 SessionPhase::Exited,
                 Some("grok"),
                 true,
@@ -5615,6 +5528,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             phase_after_output(
+                WorkerKind::Grok,
                 SessionPhase::Running,
                 Some("grok"),
                 false,
@@ -5627,6 +5541,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             phase_after_output(
+                WorkerKind::Grok,
                 SessionPhase::Running,
                 Some("grok"),
                 true,
@@ -5653,16 +5568,75 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn detects_interactive_grok_prompts_as_blocked() {
+    fn detects_interactive_grok_and_codex_prompts_as_blocked() {
         assert_eq!(
-            blocked_reason("Run Grok Build in a project directory?"),
+            blocked_reason(WorkerKind::Grok, "Run Grok Build in a project directory?"),
             Some("grok-project-directory")
         );
         assert_eq!(
-            blocked_reason("Type your answer here  Enter:submit"),
+            blocked_reason(WorkerKind::Grok, "Type your answer here  Enter:submit"),
             Some("grok-interactive-prompt")
         );
-        assert_eq!(blocked_reason("中文通讯正常"), None);
+        assert_eq!(blocked_reason(WorkerKind::Grok, "中文通讯正常"), None);
+        assert_eq!(
+            blocked_reason(
+                WorkerKind::Codex,
+                "Do you trust the contents of this directory?"
+            ),
+            Some("codex-trust-directory")
+        );
+    }
+
+    #[test]
+    fn codex_session_start_hook_binds_external_provider_session_by_cwd() {
+        let revision = Arc::new(HostRevision::new());
+        let mut session = test_session_with_revision(SessionPhase::Starting, Arc::clone(&revision));
+        session.inner.get_mut().unwrap().worker = WorkerKind::Codex;
+        let session_cwd = session.inner.get_mut().unwrap().cwd.clone();
+        let session = Arc::new(session);
+        let host = SessionHost {
+            registry: Mutex::new(SessionRegistry {
+                accepting: true,
+                sessions: HashMap::from([("gbt-codex".to_owned(), Arc::clone(&session))]),
+                provider_sessions: HashMap::new(),
+                external_bound_handles: HashSet::new(),
+                clients: HashMap::new(),
+                closed: HashMap::new(),
+            }),
+            next_id: AtomicU64::new(1),
+            orphan_policy: OrphanPolicy {
+                lease_ms: 120_000,
+                grace_ms: 600_000,
+            },
+            revision,
+        };
+
+        let mut start = hook_event(HookEventKind::SessionStart);
+        start.cwd = Some(session_cwd.clone());
+        assert!(
+            host.apply_hook_event(WorkerKind::Codex, TEST_PROVIDER_SESSION_ID, start)
+                .unwrap()
+        );
+        // Grok hook event must NOT match the bound Codex session.
+        assert!(
+            !host
+                .apply_hook_event(
+                    WorkerKind::Grok,
+                    TEST_PROVIDER_SESSION_ID,
+                    hook_event(HookEventKind::PreToolUse),
+                )
+                .unwrap()
+        );
+        // Subsequent Codex PreToolUse without cwd matches via bound provider_sessions.
+        assert!(
+            host.apply_hook_event(
+                WorkerKind::Codex,
+                TEST_PROVIDER_SESSION_ID,
+                hook_event(HookEventKind::PreToolUse),
+            )
+            .unwrap()
+        );
+        assert_eq!(session.state().unwrap().phase, SessionPhase::Running);
     }
 
     #[test]
@@ -6678,6 +6652,7 @@ pub(crate) mod tests {
             accepting: true,
             sessions: HashMap::new(),
             provider_sessions: HashMap::new(),
+            external_bound_handles: HashSet::new(),
             clients: HashMap::new(),
             closed: HashMap::new(),
         };

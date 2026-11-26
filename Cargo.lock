@@ -18,6 +18,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agent-bridge-rs"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "crossterm 0.28.1",
+ "dirs",
+ "eframe",
+ "getrandom 0.4.3",
+ "interprocess",
+ "libc",
+ "portable-pty",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "skrifa",
+ "tempfile",
+ "tungstenite",
+ "ureq",
+ "vt100",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1291,30 +1315,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2c4ee00b289aba7a9e5306d57c2d05499b2e5dc427f84ac708bd2c090212cf3e"
 dependencies = [
  "gl_generator",
-]
-
-[[package]]
-name = "grok-bridge"
-version = "0.8.11"
-dependencies = [
- "anyhow",
- "base64",
- "crossterm 0.28.1",
- "dirs",
- "eframe",
- "getrandom 0.4.3",
- "interprocess",
- "libc",
- "portable-pty",
- "ratatui",
- "serde",
- "serde_json",
- "skrifa",
- "tempfile",
- "tungstenite",
- "ureq",
- "vt100",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
