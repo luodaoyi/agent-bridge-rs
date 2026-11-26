@@ -5,12 +5,12 @@ const { existsSync } = require('node:fs');
 const { dirname, join } = require('node:path');
 
 const TARGETS = {
-  'win32:x64': ['@asural/grok-bridge-win32-x64', 'grok-bridge.exe'],
-  'win32:arm64': ['@asural/grok-bridge-win32-arm64', 'grok-bridge.exe'],
-  'linux:x64': ['@asural/grok-bridge-linux-x64', 'grok-bridge'],
-  'linux:arm64': ['@asural/grok-bridge-linux-arm64', 'grok-bridge'],
-  'darwin:x64': ['@asural/grok-bridge-darwin-x64', 'grok-bridge'],
-  'darwin:arm64': ['@asural/grok-bridge-darwin-arm64', 'grok-bridge'],
+  'win32:x64': ['@asural/agent-bridge-win32-x64', 'agent-bridge.exe'],
+  'win32:arm64': ['@asural/agent-bridge-win32-arm64', 'agent-bridge.exe'],
+  'linux:x64': ['@asural/agent-bridge-linux-x64', 'agent-bridge'],
+  'linux:arm64': ['@asural/agent-bridge-linux-arm64', 'agent-bridge'],
+  'darwin:x64': ['@asural/agent-bridge-darwin-x64', 'agent-bridge'],
+  'darwin:arm64': ['@asural/agent-bridge-darwin-arm64', 'agent-bridge'],
 };
 
 (() => {
@@ -26,17 +26,17 @@ const TARGETS = {
     if (result.error) throw result.error;
     process.exit(result.status ?? (result.signal ? 1 : 0));
   } catch (err) {
-    console.error(`[grok-bridge] ${err.message}`);
+    console.error(`[agent-bridge] ${err.message}`);
     process.exit(1);
   }
 })();
 
 function resolveBinary() {
-  if (process.env.GROK_BRIDGE_BINARY) {
-    if (!existsSync(process.env.GROK_BRIDGE_BINARY)) {
-      throw new Error(`GROK_BRIDGE_BINARY not found: ${process.env.GROK_BRIDGE_BINARY}`);
+  if (process.env.AGENT_BRIDGE_BINARY) {
+    if (!existsSync(process.env.AGENT_BRIDGE_BINARY)) {
+      throw new Error(`AGENT_BRIDGE_BINARY not found: ${process.env.AGENT_BRIDGE_BINARY}`);
     }
-    return process.env.GROK_BRIDGE_BINARY;
+    return process.env.AGENT_BRIDGE_BINARY;
   }
 
   const target = TARGETS[`${process.platform}:${process.arch}`];

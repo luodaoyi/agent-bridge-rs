@@ -1,16 +1,22 @@
 {
-  "name": "@asural/grok-bridge-win32-x64",
-  "version": "0.8.11",
-  "description": "Windows x64 native binary for grok-bridge",
+  "name": "@asural/agent-bridge-win32-x64",
+  "version": "0.9.0",
+  "description": "Windows x64 native binary for agent-bridge",
   "license": "MIT",
-  "os": ["win32"],
-  "cpu": ["x64"],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "bin": {
-    "grok-bridge": "bin/grok-bridge.exe"
+    "agent-bridge": "bin/agent-bridge.exe"
   },
-  "files": ["bin"],
+  "files": [
+    "bin"
+  ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/luodaoyi/grok-bridge-rs.git"
+    "url": "git+https://github.com/luodaoyi/agent-bridge-rs.git"
   }
 }

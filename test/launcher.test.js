@@ -2,7 +2,7 @@
 
 const assert = require('node:assert');
 const { spawnSync, spawn } = require('node:child_process');
-const { existsSync, readFileSync } = require('node:fs');
+const { existsSync } = require('node:fs');
 const { join, resolve } = require('node:path');
 
 const cliJs = join(__dirname, '..', 'bin', 'cli.js');
@@ -10,11 +10,13 @@ const root = join(__dirname, '..');
 const targetRoot = process.env.CARGO_TARGET_DIR
   ? resolve(root, process.env.CARGO_TARGET_DIR)
   : join(root, 'target');
-const binary = join(
-  targetRoot,
-  'debug',
-  process.platform === 'win32' ? 'grok-bridge.exe' : 'grok-bridge'
-);
+const binary = process.env.AGENT_BRIDGE_TEST_BINARY
+  ? resolve(root, process.env.AGENT_BRIDGE_TEST_BINARY)
+  : join(
+      targetRoot,
+      'debug',
+      process.platform === 'win32' ? 'agent-bridge.exe' : 'agent-bridge'
+    );
 
 function test(name, fn) {
   try {
@@ -34,15 +36,15 @@ if (!existsSync(binary)) {
 
 test('resolves binary via environment override', () => {
   const result = spawnSync(process.execPath, [cliJs, '--version'], {
-    env: { ...process.env, GROK_BRIDGE_BINARY: binary },
+    env: { ...process.env, AGENT_BRIDGE_BINARY: binary },
     encoding: 'utf8',
   });
-  assert(result.status === 0, `should succeed with GROK_BRIDGE_BINARY override: ${result.stderr}`);
+  assert(result.status === 0, `should succeed with AGENT_BRIDGE_BINARY override: ${result.stderr}`);
 });
 
-test('errors when GROK_BRIDGE_BINARY does not exist', () => {
+test('errors when AGENT_BRIDGE_BINARY does not exist', () => {
   const result = spawnSync(process.execPath, [cliJs, '--version'], {
-    env: { ...process.env, GROK_BRIDGE_BINARY: '/nonexistent/grok-bridge' },
+    env: { ...process.env, AGENT_BRIDGE_BINARY: '/nonexistent/agent-bridge' },
     encoding: 'utf8',
   });
   assert(result.status !== 0, 'should fail with nonexistent override');
@@ -53,7 +55,7 @@ test('passes stdin when not a TTY', () => {
   const payload = '{"hook":"test-stdin-forwarding"}';
   const result = spawnSync(process.execPath, [cliJs, 'hooks', 'status'], {
     input: payload,
-    env: { ...process.env, GROK_BRIDGE_BINARY: binary },
+    env: { ...process.env, AGENT_BRIDGE_BINARY: binary },
     encoding: 'utf8',
   });
   assert(result.status === 0, `stdin forwarding failed: ${result.stderr}`);
@@ -61,16 +63,16 @@ test('passes stdin when not a TTY', () => {
 
 test('passes argv to binary', () => {
   const result = spawnSync(process.execPath, [cliJs, 'list'], {
-    env: { ...process.env, GROK_BRIDGE_BINARY: binary },
+    env: { ...process.env, AGENT_BRIDGE_BINARY: binary },
     encoding: 'utf8',
   });
   assert(result.status === 0 || result.stderr.includes('No server'), 'should pass argv to binary');
 });
 
-test('argv invocation does not block when stdin remains open', (done) => {
+test('argv invocation does not block when stdin remains open', () => {
   const child = spawn(process.execPath, [cliJs, 'list'], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, GROK_BRIDGE_BINARY: binary },
+    env: { ...process.env, AGENT_BRIDGE_BINARY: binary },
   });
   let stderr = '';
   child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
