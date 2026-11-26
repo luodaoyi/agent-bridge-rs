@@ -312,7 +312,7 @@ export function validateDiff({ changedFiles, diffText, prBody = '' }) {
     const hasInlineRustTestAddition = diffSections
       .filter((s) => /^src\/.*\.rs$/.test(toPosix(s.path)))
       .some((s) =>
-        s.addedLines.some((line) => /\b(?:#\[test\]|mod tests|assert[_a-z]*!)\b/.test(line))
+        s.addedLines.some((line) => /(?:#\[test\]|\bmod tests\b|\bassert[_a-z]*!)/.test(line))
       );
 
     const hasNoTestWaiver = /No-Test-Reason:\s*\S+/i.test(prBody);
