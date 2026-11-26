@@ -1,6 +1,6 @@
 use std::{
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
@@ -36,14 +36,143 @@ const PARENT_HOST_ENV_KEYS: &[&str] = &[
 ];
 
 pub(crate) fn resolve_worker_bin(worker: WorkerKind) -> OsString {
-    match worker {
-        WorkerKind::Grok => env::var_os("GROK_BIN")
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(default_grok_bin),
-        WorkerKind::Codex => env::var_os("CODEX_BIN")
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(default_codex_bin),
+    let (env_key, stem, fallback) = match worker {
+        WorkerKind::Grok => ("GROK_BIN", "grok", default_grok_bin()),
+        WorkerKind::Codex => ("CODEX_BIN", "codex", default_codex_bin()),
+    };
+    if let Some(value) = env::var_os(env_key).filter(|value| !value.is_empty()) {
+        return value;
     }
+    #[cfg(windows)]
+    if let Some(found) = find_in_windows_path(stem) {
+        return found;
+    }
+    #[cfg(not(windows))]
+    let _ = stem;
+    fallback
+}
+
+#[cfg(windows)]
+fn find_in_windows_path(stem: &str) -> Option<OsString> {
+    let path_env = env::var_os("PATH")?;
+    for dir in env::split_paths(&path_env) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        for ext in ["exe", "cmd", "bat"] {
+            let candidate = dir.join(format!("{stem}.{ext}"));
+            if candidate.is_file() {
+                return Some(candidate.into_os_string());
+            }
+        }
+    }
+    None
+}
+
+fn is_windows_cmd_script(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+}
+
+fn strip_enclosing_quotes(token: &str) -> &str {
+    token
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(token)
+}
+
+fn expand_cmd_dir_token(token: &str, cmd_dir: &Path) -> Option<PathBuf> {
+    let unquoted = strip_enclosing_quotes(token.trim());
+    for prefix in ["%~dp0\\", "%~dp0/", "%~dp0", "%dp0%\\", "%dp0%/", "%dp0%"] {
+        if let Some(rest) = unquoted.strip_prefix(prefix) {
+            let mut path = cmd_dir.to_path_buf();
+            for component in rest.split(['\\', '/']) {
+                if !component.is_empty() {
+                    path.push(component);
+                }
+            }
+            return Some(path);
+        }
+    }
+    None
+}
+
+pub(crate) fn parse_windows_node_cmd_shim(
+    cmd_dir: &Path,
+    content: &str,
+) -> Option<(OsString, Vec<OsString>)> {
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if !line.contains("%*") || !line.to_ascii_lowercase().contains("node_modules") {
+            continue;
+        }
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        for ch in line.chars() {
+            match ch {
+                '"' => {
+                    in_quotes = !in_quotes;
+                    current.push(ch);
+                }
+                c if c.is_whitespace() && !in_quotes => {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                }
+                c => current.push(c),
+            }
+        }
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+
+        for token in tokens {
+            let unquoted = strip_enclosing_quotes(&token);
+            let lower = unquoted.to_ascii_lowercase();
+            if !(lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".cjs")) {
+                continue;
+            }
+            let script_path =
+                expand_cmd_dir_token(unquoted, cmd_dir).unwrap_or_else(|| cmd_dir.join(unquoted));
+            let local_node = cmd_dir.join("node.exe");
+            let node_bin = if local_node.is_file() {
+                local_node.into_os_string()
+            } else {
+                OsString::from("node.exe")
+            };
+            return Some((node_bin, vec![script_path.into_os_string()]));
+        }
+    }
+    None
+}
+
+fn resolve_launch_target(bin: &OsStr) -> (OsString, Vec<OsString>) {
+    let path = Path::new(bin);
+    if !is_windows_cmd_script(path) {
+        return (bin.to_os_string(), Vec::new());
+    }
+    if let (Some(cmd_dir), Ok(content)) = (path.parent(), fs::read_to_string(path))
+        && let Some(resolved) = parse_windows_node_cmd_shim(cmd_dir, &content)
+    {
+        return resolved;
+    }
+    (
+        OsString::from("cmd.exe"),
+        vec![
+            OsString::from("/d"),
+            OsString::from("/c"),
+            bin.to_os_string(),
+        ],
+    )
+}
+
+pub(crate) fn build_probe_command(bin: &OsStr) -> std::process::Command {
+    let (program, prefix_args) = resolve_launch_target(bin);
+    let mut command = std::process::Command::new(program);
+    command.args(prefix_args);
+    command
 }
 
 pub(crate) fn default_grok_bin() -> OsString {
@@ -88,7 +217,11 @@ pub(crate) fn build_worker_command(
     provider_session_id: &str,
     state_dir: Option<&Path>,
 ) -> CommandBuilder {
-    let mut command = CommandBuilder::new(bin);
+    let (program, prefix_args) = resolve_launch_target(bin.as_os_str());
+    let mut command = CommandBuilder::new(program);
+    for arg in prefix_args {
+        command.arg(arg);
+    }
     command.cwd(cwd.as_os_str());
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
@@ -531,6 +664,98 @@ mod tests {
         assert_eq!(
             phase_from_title(WorkerKind::Codex, Some("codex")),
             Some(SessionPhase::Idle)
+        );
+    }
+
+    #[test]
+    fn parses_pnpm_and_npm_windows_cmd_node_shims() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim_content = r#"@SETLOCAL
+@IF EXIST "%~dp0\node.exe" (
+  "%~dp0\node.exe"  "%~dp0\..\global\v11\pkg\node_modules\@openai\codex\bin\codex.js" %*
+) ELSE (
+  @SET PATHEXT=%PATHEXT:;.JS;=;%
+  node  "%~dp0\..\global\v11\pkg\node_modules\@openai\codex\bin\codex.js" %*
+)
+"#;
+        let (node_bin, args) = parse_windows_node_cmd_shim(dir.path(), shim_content).unwrap();
+        assert_eq!(node_bin, OsString::from("node.exe"));
+        assert_eq!(
+            args,
+            vec![
+                dir.path()
+                    .join("..")
+                    .join("global")
+                    .join("v11")
+                    .join("pkg")
+                    .join("node_modules")
+                    .join("@openai")
+                    .join("codex")
+                    .join("bin")
+                    .join("codex.js")
+                    .into_os_string()
+            ]
+        );
+
+        let local_node = dir.path().join("node.exe");
+        fs::write(&local_node, b"").unwrap();
+        let npm_shim = "\"%_prog%\"  \"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\n";
+        let (local_node_bin, npm_args) = parse_windows_node_cmd_shim(dir.path(), npm_shim).unwrap();
+        assert_eq!(local_node_bin, local_node.into_os_string());
+        assert_eq!(
+            npm_args,
+            vec![
+                dir.path()
+                    .join("node_modules")
+                    .join("@openai")
+                    .join("codex")
+                    .join("bin")
+                    .join("codex.js")
+                    .into_os_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn build_worker_command_unwraps_cmd_shim_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd_path = dir.path().join("codex.CMD");
+        fs::write(
+            &cmd_path,
+            "node \"%~dp0\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\n",
+        )
+        .unwrap();
+
+        let command = build_worker_command(
+            WorkerKind::Codex,
+            &cmd_path.clone().into_os_string(),
+            dir.path(),
+            Some("hello <world> & test"),
+            None,
+            true,
+            None,
+            false,
+            "01234567-89ab-4def-8123-456789abcdef",
+            None,
+        );
+        let argv = command
+            .get_argv()
+            .iter()
+            .map(|item| item.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(argv[0], "node.exe");
+        assert!(argv[1].ends_with("codex.js"), "argv[1]={}", argv[1]);
+        assert_eq!(
+            &argv[2..],
+            &[
+                "-C",
+                &dir.path().to_string_lossy(),
+                "-s",
+                "workspace-write",
+                "-a",
+                "never",
+                "hello <world> & test"
+            ]
         );
     }
 }

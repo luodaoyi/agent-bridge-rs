@@ -183,7 +183,6 @@ pub fn apply(target: InstallTarget) -> Result<ApplyResult> {
 pub fn apply_from(source: &Path, paths: &Paths, target: InstallTarget) -> Result<ApplyResult> {
     let mut codex_binary = None;
     let mut agy_binary = None;
-    let mut grok_hooks = None;
     let mut codex_hooks = None;
 
     if matches!(target, InstallTarget::All | InstallTarget::Codex) {
@@ -196,16 +195,6 @@ pub fn apply_from(source: &Path, paths: &Paths, target: InstallTarget) -> Result
         copy_executable(source, &paths.codex_binary)?;
         extract_codex_skill_files(&paths.codex_skill_root)?;
         codex_binary = Some(paths.codex_binary.clone());
-
-        let hook_status = hooks::install_at_path(
-            WorkerKind::Grok,
-            &paths.codex_binary,
-            &paths.grok_hooks_file,
-        )?;
-        if !hook_status.installed {
-            bail!("Grok Hooks 安装失败");
-        }
-        grok_hooks = Some(paths.grok_hooks_file.clone());
     }
 
     if matches!(target, InstallTarget::All | InstallTarget::Agy) {
@@ -218,28 +207,28 @@ pub fn apply_from(source: &Path, paths: &Paths, target: InstallTarget) -> Result
         copy_executable(source, &paths.agy_binary)?;
         extract_agy_plugin_files(&paths.agy_plugin_root)?;
         agy_binary = Some(paths.agy_binary.clone());
+    }
 
-        let codex_hook_status = hooks::install_at_path(
-            WorkerKind::Codex,
-            &paths.agy_binary,
-            &paths.codex_hooks_file,
-        )?;
+    let hook_binary = if matches!(target, InstallTarget::All | InstallTarget::Agy) {
+        &paths.agy_binary
+    } else {
+        &paths.codex_binary
+    };
+
+    let grok_hook_status =
+        hooks::install_at_path(WorkerKind::Grok, hook_binary, &paths.grok_hooks_file)?;
+    if !grok_hook_status.installed {
+        bail!("Grok Hooks 安装失败");
+    }
+    let grok_hooks = Some(paths.grok_hooks_file.clone());
+
+    if matches!(target, InstallTarget::All | InstallTarget::Agy) {
+        let codex_hook_status =
+            hooks::install_at_path(WorkerKind::Codex, hook_binary, &paths.codex_hooks_file)?;
         if !codex_hook_status.installed {
             bail!("Codex Hooks 安装失败");
         }
         codex_hooks = Some(paths.codex_hooks_file.clone());
-
-        if grok_hooks.is_none() {
-            let grok_hook_status = hooks::install_at_path(
-                WorkerKind::Grok,
-                &paths.agy_binary,
-                &paths.grok_hooks_file,
-            )?;
-            if !grok_hook_status.installed {
-                bail!("Grok Hooks 安装失败");
-            }
-            grok_hooks = Some(paths.grok_hooks_file.clone());
-        }
     }
 
     let legacy_grok_bridge_reminder = paths
@@ -288,10 +277,10 @@ pub fn status(paths: &Paths) -> Result<InstallationStatus> {
             .join("skills/grok-worker/SKILL.md")
             .is_file();
 
-    let grok_hook_bin = if codex_bin_installed {
-        &paths.codex_binary
-    } else {
+    let grok_hook_bin = if agy_bin_installed {
         &paths.agy_binary
+    } else {
+        &paths.codex_binary
     };
     let grok_hooks_status =
         hooks::status_at_path(WorkerKind::Grok, grok_hook_bin, &paths.grok_hooks_file)?;

@@ -16,7 +16,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+#[cfg(windows)]
+use portable_pty::CommandBuilder;
+use portable_pty::{MasterPty, PtySize, native_pty_system};
 
 use crate::{
     protocol::{
@@ -1898,7 +1900,9 @@ impl Session {
             if wait_satisfied(&mut inner, condition) {
                 return Ok(inner.wait_result(condition, true, false, None));
             }
-            if condition == WaitCondition::TuiIdle && phase_is_terminal(inner.phase) {
+            if condition == WaitCondition::TuiIdle
+                && (phase_is_terminal(inner.phase) || inner.process_done)
+            {
                 return Ok(inner.wait_result(condition, false, false, None));
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -2399,6 +2403,14 @@ impl Session {
         } else {
             false
         };
+        #[cfg(windows)]
+        if !finalized {
+            // On Windows ConPTY, once the child exits naturally, release the
+            // master handle so ClosePseudoConsole lets the reader observe EOF
+            // after draining any buffered output.
+            self.close_writer();
+            self.release_master();
+        }
         self.finish_transition(finalized);
     }
 

@@ -28,7 +28,7 @@ mod app {
         protocol::{
             CodexSandboxMode, Request, ResponseEnvelope, ResponseResult, WaitCondition, WorkerKind,
         },
-        server, session, terminal_gui, transport, tui, worker,
+        server, terminal_gui, transport, tui, worker,
     };
 
     struct TerminalOptions {
@@ -161,7 +161,9 @@ mod app {
                 Ok(0)
             }
             #[cfg(windows)]
-            Action::InternalWindowsJobChild(arguments) => session::run_windows_job_child(arguments),
+            Action::InternalWindowsJobChild(arguments) => {
+                crate::session::run_windows_job_child(arguments)
+            }
         }
     }
 
@@ -697,7 +699,8 @@ mod app {
             WorkerKind::Grok => "GROK_BIN",
             WorkerKind::Codex => "CODEX_BIN",
         };
-        match Command::new(&bin).arg("--version").output() {
+        let mut probe_command = worker::build_probe_command(OsStr::new(&bin));
+        match probe_command.arg("--version").output() {
             Ok(output) if output.status.success() => {
                 print!(
                     "[{}] {}",
