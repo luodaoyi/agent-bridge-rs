@@ -5,6 +5,7 @@ on:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,6 +18,57 @@ jobs:
         with:
           persist-credentials: false
       - run: cargo fmt --check
+
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@1044a6dea927916f2c38ba5aeffbc0a847b1221a # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
+      - name: Validate hook templates and manifest versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for hook in hooks/windows/agent-bridge-grok.json hooks/unix/agent-bridge-grok.json; do
+            jq -e '.hooks | length == 14' "$hook" >/dev/null
+            jq -e '[.hooks[][].hooks[] | select(.env.AGENT_BRIDGE_HOOK_PROTOCOL == "5")] | length == 14' "$hook" >/dev/null
+          done
+          for hook in hooks/windows/agent-bridge-codex.json hooks/unix/agent-bridge-codex.json; do
+            jq -e '.hooks | length == 8' "$hook" >/dev/null
+          done
+
+          node <<'NODE'
+          const assert = require('node:assert');
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const cargoToml = fs.readFileSync('Cargo.toml', 'utf8');
+          const versionMatch = cargoToml.match(/^\s*version\s*=\s*"([^"]+)"/m);
+          assert(versionMatch, 'Missing [package] version in Cargo.toml');
+          const expectedVersion = versionMatch[1];
+
+          const plugin = JSON.parse(fs.readFileSync('plugin.json', 'utf8'));
+          assert.strictEqual(plugin.name, 'agent-bridge', 'plugin.json name must be agent-bridge');
+
+          const entryManifests = ['package.json', path.join('packages', 'agent-bridge-rs', 'package.json')];
+          for (const manifestPath of entryManifests) {
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            assert.strictEqual(manifest.version, expectedVersion, `${manifestPath} version mismatch`);
+            for (const [dep, ver] of Object.entries(manifest.optionalDependencies || {})) {
+              assert.strictEqual(ver, expectedVersion, `${manifestPath} optionalDependency ${dep} mismatch`);
+            }
+          }
+
+          for (const dir of ['win32-x64', 'win32-arm64', 'linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64']) {
+            const manifestPath = path.join('packages', dir, 'package.json');
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            assert.strictEqual(manifest.version, expectedVersion, `${manifestPath} version mismatch`);
+          }
+          console.log(`Validated hook templates and manifests for version ${expectedVersion}`);
+          NODE
 
   webui:
     runs-on: ubuntu-24.04
@@ -45,6 +97,7 @@ jobs:
   build:
     needs:
       - format
+      - validate
       - webui
     strategy:
       fail-fast: false
@@ -53,26 +106,35 @@ jobs:
           - platform: windows-x86_64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
+            binary: target/x86_64-pc-windows-msvc/release/agent-bridge.exe
           - platform: windows-arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
+            binary: target/aarch64-pc-windows-msvc/release/agent-bridge.exe
           - platform: linux-x86_64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            binary: target/x86_64-unknown-linux-gnu/release/agent-bridge
           - platform: linux-arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            binary: target/aarch64-unknown-linux-gnu/release/agent-bridge
           - platform: macos-x86_64
             runner: macos-15-intel
             target: x86_64-apple-darwin
+            binary: target/x86_64-apple-darwin/release/agent-bridge
           - platform: macos-arm64
             runner: macos-15
             target: aarch64-apple-darwin
+            binary: target/aarch64-apple-darwin/release/agent-bridge
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@1044a6dea927916f2c38ba5aeffbc0a847b1221a # v7
         with:
           persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
       - name: Verify Windows host architecture mapping
         if: runner.os == 'Windows'
         shell: pwsh
@@ -125,6 +187,10 @@ jobs:
       - run: cargo test --locked --target ${{ matrix.target }}
       - run: cargo clippy --locked --target ${{ matrix.target }} --all-targets --all-features -- -D warnings
       - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Run Node launcher tests against release binary
+        env:
+          AGENT_BRIDGE_TEST_BINARY: ${{ matrix.binary }}
+        run: node test/launcher.test.js
 
   cleanup:
     if: ${{ success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}

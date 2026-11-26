@@ -1,9 +1,20 @@
-name: Build and release Skill
+name: Build and Release
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to build and release (e.g. v0.9.0)"
+        required: true
+        type: string
+      publish_npm:
+        description: "Publish packages to npmjs.org"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -15,27 +26,88 @@ jobs:
       contents: read
     outputs:
       skip: ${{ steps.check.outputs.skip }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      publish_npm: ${{ steps.resolve.outputs.publish_npm }}
     steps:
+      - name: Resolve release parameters
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PUBLISH_NPM: ${{ inputs.publish_npm }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+            publish_npm="$INPUT_PUBLISH_NPM"
+          else
+            tag="$REF_NAME"
+            publish_npm="true"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag format: '$tag' (expected vX.Y.Z)" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish_npm=$publish_npm" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@1044a6dea927916f2c38ba5aeffbc0a847b1221a # v7
+        with:
+          ref: ${{ steps.resolve.outputs.tag }}
+          persist-credentials: false
+
+      - name: Verify Cargo.toml version matches tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          tag_ver="${RELEASE_TAG#v}"
+          cargo_ver="$(sed -nE 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -n1)"
+          if [ "$cargo_ver" != "$tag_ver" ]; then
+            echo "Cargo.toml version ($cargo_ver) does not match tag $RELEASE_TAG ($tag_ver)" >&2
+            exit 1
+          fi
+          echo "Verified Cargo.toml version $cargo_ver matches tag $RELEASE_TAG"
+
       - name: Skip if this tag is already fully released
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+          PUBLISH_NPM: ${{ steps.resolve.outputs.publish_npm }}
         shell: bash
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
+          tag="$RELEASE_TAG"
           ver="${tag#v}"
           skip=true
 
-          archive="grok-build-skill-${tag}.zip"
-          checksum="${archive}.sha256"
+          expected_assets=(
+            "agent-bridge-skill-${tag}.zip"
+            "agent-bridge-skill-${tag}.zip.sha256"
+            "agent-bridge-${tag}-windows-x86_64.zip"
+            "agent-bridge-${tag}-windows-arm64.zip"
+            "agent-bridge-${tag}-linux-x86_64.tar.gz"
+            "agent-bridge-${tag}-linux-arm64.tar.gz"
+            "agent-bridge-${tag}-macos-x86_64.tar.gz"
+            "agent-bridge-${tag}-macos-arm64.tar.gz"
+            "SHA256SUMS.txt"
+          )
+
           if release_json="$(gh release view "$tag" --json isDraft,assets 2>/dev/null)"; then
-            if printf "%s\n" "$release_json" | jq -e --arg archive "$archive" --arg checksum "$checksum" \
-              '(.isDraft | not) and ([.assets[].name] | index($archive) != null) and ([.assets[].name] | index($checksum) != null)' \
-              >/dev/null; then
-              echo "GitHub release $tag is published with required assets"
+            is_draft="$(printf "%s\n" "$release_json" | jq -r '.isDraft')"
+            if [ "$is_draft" = "false" ]; then
+              for asset in "${expected_assets[@]}"; do
+                if ! printf "%s\n" "$release_json" | jq -e --arg asset "$asset" '[.assets[].name] | index($asset) != null' >/dev/null; then
+                  echo "GitHub release $tag is missing asset: $asset"
+                  skip=false
+                fi
+              done
             else
-              echo "GitHub release $tag is draft or missing assets"
+              echo "GitHub release $tag is still a draft"
               skip=false
             fi
           else
@@ -43,25 +115,27 @@ jobs:
             skip=false
           fi
 
-          packages=(
-            "@asural/grok-bridge-win32-x64"
-            "@asural/grok-bridge-win32-arm64"
-            "@asural/grok-bridge-linux-x64"
-            "@asural/grok-bridge-linux-arm64"
-            "@asural/grok-bridge-darwin-x64"
-            "@asural/grok-bridge-darwin-arm64"
-            "@asural/grok-bridge"
-            "grok-bridge-rs"
-          )
+          if [ "$PUBLISH_NPM" = "true" ]; then
+            packages=(
+              "@asural/agent-bridge-win32-x64"
+              "@asural/agent-bridge-win32-arm64"
+              "@asural/agent-bridge-linux-x64"
+              "@asural/agent-bridge-linux-arm64"
+              "@asural/agent-bridge-darwin-x64"
+              "@asural/agent-bridge-darwin-arm64"
+              "@asural/agent-bridge"
+              "agent-bridge-rs"
+            )
 
-          for name in "${packages[@]}"; do
-            if npm view "$name@$ver" version --registry https://registry.npmjs.org >/dev/null 2>&1; then
-              echo "Already published: $name@$ver"
-            else
-              echo "Missing npm package: $name@$ver"
-              skip=false
-            fi
-          done
+            for name in "${packages[@]}"; do
+              if npm view "$name@$ver" version --registry https://registry.npmjs.org >/dev/null 2>&1; then
+                echo "Already published: $name@$ver"
+              else
+                echo "Missing npm package: $name@$ver"
+                skip=false
+              fi
+            done
+          fi
 
           echo "skip=$skip" >> "$GITHUB_OUTPUT"
 
@@ -72,6 +146,7 @@ jobs:
     steps:
       - uses: actions/checkout@1044a6dea927916f2c38ba5aeffbc0a847b1221a # v7
         with:
+          ref: ${{ needs.gate.outputs.tag }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -116,32 +191,36 @@ jobs:
           - platform: windows-x86_64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
-            binary: target/x86_64-pc-windows-msvc/release/grok-bridge.exe
+            binary: target/x86_64-pc-windows-msvc/release/agent-bridge.exe
           - platform: windows-arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
-            binary: target/aarch64-pc-windows-msvc/release/grok-bridge.exe
+            binary: target/aarch64-pc-windows-msvc/release/agent-bridge.exe
           - platform: linux-x86_64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            binary: target/x86_64-unknown-linux-gnu/release/grok-bridge
+            binary: target/x86_64-unknown-linux-gnu/release/agent-bridge
           - platform: linux-arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            binary: target/aarch64-unknown-linux-gnu/release/grok-bridge
+            binary: target/aarch64-unknown-linux-gnu/release/agent-bridge
           - platform: macos-x86_64
             runner: macos-15-intel
             target: x86_64-apple-darwin
-            binary: target/x86_64-apple-darwin/release/grok-bridge
+            binary: target/x86_64-apple-darwin/release/agent-bridge
           - platform: macos-arm64
             runner: macos-15
             target: aarch64-apple-darwin
-            binary: target/aarch64-apple-darwin/release/grok-bridge
+            binary: target/aarch64-apple-darwin/release/agent-bridge
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@1044a6dea927916f2c38ba5aeffbc0a847b1221a # v7
         with:
+          ref: ${{ needs.gate.outputs.tag }}
           persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
       - uses: actions/download-artifact@974686ed5098c7f9c9289ec946b9058e496a2561 # v8
         with:
           name: webui-dist
@@ -181,6 +260,10 @@ jobs:
       - run: cargo test --locked --target ${{ matrix.target }}
       - run: cargo clippy --locked --target ${{ matrix.target }} --all-targets --all-features -- -D warnings
       - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Run Node launcher tests against release binary
+        env:
+          AGENT_BRIDGE_TEST_BINARY: ${{ matrix.binary }}
+        run: node test/launcher.test.js
       - name: Upload binary
         id: upload-binary
         continue-on-error: true
@@ -212,19 +295,26 @@ jobs:
     steps:
       - uses: actions/checkout@1044a6dea927916f2c38ba5aeffbc0a847b1221a # v7
         with:
+          ref: ${{ needs.gate.outputs.tag }}
           persist-credentials: false
       - uses: actions/download-artifact@974686ed5098c7f9c9289ec946b9058e496a2561 # v8
         with:
           pattern: binary-*
           path: artifacts
 
-      - name: Assemble Skill archive
+      - name: Assemble Skill, Plugin, and per-platform archives
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
         run: |
           set -euo pipefail
-          root="package/grok-build"
+          tag="$RELEASE_TAG"
+          root="package/agent-bridge"
           mkdir -p \
+            dist \
             "$root/agents" \
+            "$root/skills/codex-worker" \
+            "$root/skills/grok-worker" \
             "$root/hooks/windows" \
             "$root/hooks/unix" \
             "$root/bin/windows-x86_64" \
@@ -237,73 +327,74 @@ jobs:
           install -m 0644 README.md "$root/README.md"
           install -m 0644 README-CN.md "$root/README-CN.md"
           install -m 0644 SKILL.md "$root/SKILL.md"
+          install -m 0644 plugin.json "$root/plugin.json"
+          install -m 0644 skills/codex-worker/SKILL.md "$root/skills/codex-worker/SKILL.md"
+          install -m 0644 skills/grok-worker/SKILL.md "$root/skills/grok-worker/SKILL.md"
           install -m 0644 agents/openai.yaml "$root/agents/openai.yaml"
-          install -m 0644 hooks/windows/grok-bridge.json "$root/hooks/windows/grok-bridge.json"
-          install -m 0644 hooks/unix/grok-bridge.json "$root/hooks/unix/grok-bridge.json"
-          install -m 0755 artifacts/binary-windows-x86_64/grok-bridge.exe "$root/bin/windows-x86_64/grok-bridge.exe"
-          install -m 0755 artifacts/binary-windows-arm64/grok-bridge.exe "$root/bin/windows-arm64/grok-bridge.exe"
-          install -m 0755 artifacts/binary-linux-x86_64/grok-bridge "$root/bin/linux-x86_64/grok-bridge"
-          install -m 0755 artifacts/binary-linux-arm64/grok-bridge "$root/bin/linux-arm64/grok-bridge"
-          install -m 0755 artifacts/binary-macos-x86_64/grok-bridge "$root/bin/macos-x86_64/grok-bridge"
-          install -m 0755 artifacts/binary-macos-arm64/grok-bridge "$root/bin/macos-arm64/grok-bridge"
+          install -m 0644 hooks/windows/agent-bridge-grok.json "$root/hooks/windows/agent-bridge-grok.json"
+          install -m 0644 hooks/unix/agent-bridge-grok.json "$root/hooks/unix/agent-bridge-grok.json"
+          install -m 0644 hooks/windows/agent-bridge-codex.json "$root/hooks/windows/agent-bridge-codex.json"
+          install -m 0644 hooks/unix/agent-bridge-codex.json "$root/hooks/unix/agent-bridge-codex.json"
+          install -m 0755 artifacts/binary-windows-x86_64/agent-bridge.exe "$root/bin/windows-x86_64/agent-bridge.exe"
+          install -m 0755 artifacts/binary-windows-arm64/agent-bridge.exe "$root/bin/windows-arm64/agent-bridge.exe"
+          install -m 0755 artifacts/binary-linux-x86_64/agent-bridge "$root/bin/linux-x86_64/agent-bridge"
+          install -m 0755 artifacts/binary-linux-arm64/agent-bridge "$root/bin/linux-arm64/agent-bridge"
+          install -m 0755 artifacts/binary-macos-x86_64/agent-bridge "$root/bin/macos-x86_64/agent-bridge"
+          install -m 0755 artifacts/binary-macos-arm64/agent-bridge "$root/bin/macos-arm64/agent-bridge"
 
-          test "$(find "$root" -type f | wc -l)" -eq 12
-          for hook in "$root/hooks/windows/grok-bridge.json" "$root/hooks/unix/grok-bridge.json"; do
+          test "$(find "$root" -type f | wc -l)" -eq 17
+          for hook in "$root/hooks/windows/agent-bridge-grok.json" "$root/hooks/unix/agent-bridge-grok.json"; do
             jq -e '.hooks | length == 14' "$hook" >/dev/null
-            jq -e '[.hooks[][].hooks[] | select(.env.GROK_BRIDGE_HOOK_PROTOCOL == "4")] | length == 14' "$hook" >/dev/null
+            jq -e '[.hooks[][].hooks[] | select(.env.AGENT_BRIDGE_HOOK_PROTOCOL == "5")] | length == 14' "$hook" >/dev/null
           done
-          test -x "$root/bin/linux-x86_64/grok-bridge"
-          test -x "$root/bin/linux-arm64/grok-bridge"
-          test -x "$root/bin/macos-x86_64/grok-bridge"
-          test -x "$root/bin/macos-arm64/grok-bridge"
+          for hook in "$root/hooks/windows/agent-bridge-codex.json" "$root/hooks/unix/agent-bridge-codex.json"; do
+            jq -e '.hooks | length == 8' "$hook" >/dev/null
+          done
+          test -x "$root/bin/linux-x86_64/agent-bridge"
+          test -x "$root/bin/linux-arm64/agent-bridge"
+          test -x "$root/bin/macos-x86_64/agent-bridge"
+          test -x "$root/bin/macos-arm64/agent-bridge"
 
-          archive="grok-build-skill-${GITHUB_REF_NAME}.zip"
-          (cd package && zip -r "../$archive" grok-build)
-          sha256sum "$archive" > "$archive.sha256"
+          archive="agent-bridge-skill-${tag}.zip"
+          (cd package && zip -r "../dist/$archive" agent-bridge)
+          (cd dist && sha256sum "$archive" > "$archive.sha256")
+
+          zip -j "dist/agent-bridge-${tag}-windows-x86_64.zip" "artifacts/binary-windows-x86_64/agent-bridge.exe"
+          zip -j "dist/agent-bridge-${tag}-windows-arm64.zip" "artifacts/binary-windows-arm64/agent-bridge.exe"
+
+          chmod +x \
+            artifacts/binary-linux-x86_64/agent-bridge \
+            artifacts/binary-linux-arm64/agent-bridge \
+            artifacts/binary-macos-x86_64/agent-bridge \
+            artifacts/binary-macos-arm64/agent-bridge
+          tar -C artifacts/binary-linux-x86_64 -czf "dist/agent-bridge-${tag}-linux-x86_64.tar.gz" agent-bridge
+          tar -C artifacts/binary-linux-arm64 -czf "dist/agent-bridge-${tag}-linux-arm64.tar.gz" agent-bridge
+          tar -C artifacts/binary-macos-x86_64 -czf "dist/agent-bridge-${tag}-macos-x86_64.tar.gz" agent-bridge
+          tar -C artifacts/binary-macos-arm64 -czf "dist/agent-bridge-${tag}-macos-arm64.tar.gz" agent-bridge
+
+          (cd dist && sha256sum agent-bridge-*.zip agent-bridge-*.tar.gz > SHA256SUMS.txt)
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
-          archive="grok-build-skill-${GITHUB_REF_NAME}.zip"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$archive" "$archive.sha256" --clobber
-            gh release edit "$GITHUB_REF_NAME" --draft=false
+          tag="$RELEASE_TAG"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+            gh release edit "$tag" --draft=false
           else
-            gh release create "$GITHUB_REF_NAME" "$archive" "$archive.sha256" \
+            gh release create "$tag" dist/* \
               --verify-tag \
               --generate-notes \
-              --title "grok-build ${GITHUB_REF_NAME}"
+              --title "agent-bridge ${tag}"
           fi
-
-  cleanup:
-    if: ${{ !cancelled() && needs.gate.outputs.skip != 'true' && needs.release.result == 'success' && needs.publish-npm.result == 'success' }}
-    needs: [gate, release, publish-npm]
-    permissions:
-      actions: write
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Delete temporary workflow artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          artifact_ids="$(
-            gh api --paginate \
-              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
-              --jq '.artifacts[].id'
-          )"
-          for artifact_id in $artifact_ids; do
-            gh api --method DELETE \
-              "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
-          done
 
   publish-npm:
     needs: [gate, release]
-    if: needs.gate.outputs.skip != 'true'
+    if: needs.gate.outputs.skip != 'true' && needs.gate.outputs.publish_npm == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -311,6 +402,7 @@ jobs:
     steps:
       - uses: actions/checkout@1044a6dea927916f2c38ba5aeffbc0a847b1221a # v7
         with:
+          ref: ${{ needs.gate.outputs.tag }}
           persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -327,7 +419,7 @@ jobs:
       - name: Update package versions
         shell: bash
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ needs.gate.outputs.tag }}
         run: |
           set -euo pipefail
           NPM_VERSION="${VERSION#v}"
@@ -336,7 +428,7 @@ jobs:
           const path = require('node:path');
           const version = process.env.NPM_VERSION || process.env.VERSION.replace(/^v/, '');
           const packageDirs = ['win32-x64', 'win32-arm64', 'linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64'];
-          const entryManifests = ['package.json', path.join('packages', 'grok-bridge-rs', 'package.json')];
+          const entryManifests = ['package.json', path.join('packages', 'agent-bridge-rs', 'package.json')];
           for (const manifestPath of entryManifests) {
             const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
             manifest.version = version;
@@ -358,28 +450,33 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p packages/{win32-x64,win32-arm64,linux-x64,linux-arm64,darwin-x64,darwin-arm64}/bin
-          cp artifacts/binary-windows-x86_64/grok-bridge.exe packages/win32-x64/bin/grok-bridge.exe
-          cp artifacts/binary-windows-arm64/grok-bridge.exe packages/win32-arm64/bin/grok-bridge.exe
-          cp artifacts/binary-linux-x86_64/grok-bridge packages/linux-x64/bin/grok-bridge
-          cp artifacts/binary-linux-arm64/grok-bridge packages/linux-arm64/bin/grok-bridge
-          cp artifacts/binary-macos-x86_64/grok-bridge packages/darwin-x64/bin/grok-bridge
-          cp artifacts/binary-macos-arm64/grok-bridge packages/darwin-arm64/bin/grok-bridge
-          chmod +x packages/linux-*/bin/grok-bridge packages/darwin-*/bin/grok-bridge
+          cp artifacts/binary-windows-x86_64/agent-bridge.exe packages/win32-x64/bin/agent-bridge.exe
+          cp artifacts/binary-windows-arm64/agent-bridge.exe packages/win32-arm64/bin/agent-bridge.exe
+          cp artifacts/binary-linux-x86_64/agent-bridge packages/linux-x64/bin/agent-bridge
+          cp artifacts/binary-linux-arm64/agent-bridge packages/linux-arm64/bin/agent-bridge
+          cp artifacts/binary-macos-x86_64/agent-bridge packages/darwin-x64/bin/agent-bridge
+          cp artifacts/binary-macos-arm64/agent-bridge packages/darwin-arm64/bin/agent-bridge
+          chmod +x packages/linux-*/bin/agent-bridge packages/darwin-*/bin/agent-bridge
 
       - name: Stage top-level npm packages
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p packages/grok-bridge-rs/bin
-          cp bin/cli.js packages/grok-bridge-rs/bin/cli.js
-          cp README.md README-CN.md LICENSE packages/grok-bridge-rs/
+          mkdir -p packages/agent-bridge-rs/bin
+          cp bin/cli.js packages/agent-bridge-rs/bin/cli.js
+          cp README.md README-CN.md LICENSE packages/agent-bridge-rs/
 
       - name: Publish platform npm packages
         id: publish-platform
         continue-on-error: true
         shell: bash
+        env:
+          NPM_TOKEN_SECRET: ${{ secrets.NPM_TOKEN }}
         run: |
           set -uo pipefail
+          if [ -n "${NPM_TOKEN_SECRET:-}" ]; then
+            export NODE_AUTH_TOKEN="$NPM_TOKEN_SECRET"
+          fi
           failed=0
           for directory in win32-x64 win32-arm64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
             name=$(node -p "require('./packages/$directory/package.json').name")
@@ -402,8 +499,13 @@ jobs:
         id: publish-scoped
         continue-on-error: true
         shell: bash
+        env:
+          NPM_TOKEN_SECRET: ${{ secrets.NPM_TOKEN }}
         run: |
           set -uo pipefail
+          if [ -n "${NPM_TOKEN_SECRET:-}" ]; then
+            export NODE_AUTH_TOKEN="$NPM_TOKEN_SECRET"
+          fi
           failed=0
           name=$(node -p "require('./package.json').name")
           version=$(node -p "require('./package.json').version")
@@ -424,14 +526,19 @@ jobs:
         id: publish-toplevel
         continue-on-error: true
         shell: bash
+        env:
+          NPM_TOKEN_SECRET: ${{ secrets.NPM_TOKEN }}
         run: |
           set -uo pipefail
+          if [ -n "${NPM_TOKEN_SECRET:-}" ]; then
+            export NODE_AUTH_TOKEN="$NPM_TOKEN_SECRET"
+          fi
           failed=0
-          name=$(node -p "require('./packages/grok-bridge-rs/package.json').name")
-          version=$(node -p "require('./packages/grok-bridge-rs/package.json').version")
+          name=$(node -p "require('./packages/agent-bridge-rs/package.json').name")
+          version=$(node -p "require('./packages/agent-bridge-rs/package.json').version")
           if npm view "$name@$version" version --registry https://registry.npmjs.org >/dev/null 2>&1; then
             echo "Already published: $name@$version"
-          elif npm publish ./packages/grok-bridge-rs --registry https://registry.npmjs.org --access public --provenance; then
+          elif npm publish ./packages/agent-bridge-rs --registry https://registry.npmjs.org --access public --provenance; then
             echo "Published: $name@$version"
           else
             echo "Failed to publish: $name@$version"
@@ -445,3 +552,26 @@ jobs:
       - name: Fail job if any npm publish failed
         if: steps.publish-platform.outcome == 'failure' || steps.publish-scoped.outcome == 'failure' || steps.publish-toplevel.outcome == 'failure'
         run: exit 1
+
+  cleanup:
+    if: ${{ !cancelled() && needs.gate.outputs.skip != 'true' && needs.release.result == 'success' && (needs.publish-npm.result == 'success' || needs.publish-npm.result == 'skipped') }}
+    needs: [gate, release, publish-npm]
+    permissions:
+      actions: write
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Delete temporary workflow artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_ids="$(
+            gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+              --jq '.artifacts[].id'
+          )"
+          for artifact_id in $artifact_ids; do
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+          done
