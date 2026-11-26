@@ -715,16 +715,12 @@ fn command_matches_managed_worker(handler: &Value, worker: WorkerKind) -> bool {
         return false;
     };
     let needle = format!("__hook --worker {}", worker.as_str());
-    if command.contains(&needle) {
-        return true;
-    }
     #[cfg(any(windows, test))]
-    if let Some(decoded) = decode_powershell_encoded_command(command)
-        && decoded.contains(&needle)
-    {
-        return true;
-    }
-    false
+    let encoded_matches =
+        decode_powershell_encoded_command(command).is_some_and(|decoded| decoded.contains(&needle));
+    #[cfg(not(any(windows, test)))]
+    let encoded_matches = false;
+    command.contains(&needle) || encoded_matches
 }
 
 #[cfg(any(windows, test))]
@@ -733,12 +729,13 @@ fn decode_powershell_encoded_command(command: &str) -> Option<String> {
     let (_, encoded) = command.split_once(marker)?;
     let encoded_token = encoded.split_whitespace().next()?;
     let bytes = BASE64.decode(encoded_token).ok()?;
-    if bytes.len() % 2 != 0 {
+    let (chunks, remainder) = bytes.as_chunks::<2>();
+    if !remainder.is_empty() {
         return None;
     }
-    let utf16 = bytes
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+    let utf16 = chunks
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair))
         .collect::<Vec<_>>();
     String::from_utf16(&utf16).ok()
 }

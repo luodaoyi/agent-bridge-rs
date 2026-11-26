@@ -386,11 +386,15 @@ struct RuntimeState {
 /// Atomically reserve one of `limit` handler slots; `false` means the cap is
 /// reached and the caller must reject the connection without spawning a thread.
 fn admit_connection(slots: &AtomicUsize, limit: usize) -> bool {
-    slots
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            (current < limit).then_some(current + 1)
-        })
-        .is_ok()
+    let mut current = slots.load(Ordering::Acquire);
+    while current < limit {
+        match slots.compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
+    false
 }
 
 /// Releases a reserved connection slot when the handler thread finishes.
