@@ -1,6 +1,6 @@
 {
   "name": "@asural/agent-bridge-win32-arm64",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Windows ARM64 native binary for agent-bridge",
   "license": "MIT",
   "os": [
