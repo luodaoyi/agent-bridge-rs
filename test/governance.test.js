@@ -93,6 +93,24 @@ test('validateDiff enforces tests on src changes unless waived and protects work
   });
   assert.equal(waived.ok, true);
 
+  const inlineRustTestDiff = [
+    'diff --git a/src/foo.rs b/src/foo.rs',
+    '--- a/src/foo.rs',
+    '+++ b/src/foo.rs',
+    '@@ -10,1 +10,5 @@',
+    '+fn helper() {}',
+    '+    #[test]',
+    '+    fn helper_works() {',
+    '+        assert_eq!(1, 1);',
+    '+    }',
+  ].join('\n');
+  const inlineRustTestOk = validateDiff({
+    changedFiles: ['src/foo.rs'],
+    diffText: inlineRustTestDiff,
+    prBody: '',
+  });
+  assert.equal(inlineRustTestOk.ok, true);
+
   const workflowBlocked = validateDiff({
     changedFiles: ['.github/workflows/ci.yml'],
     diffText: 'diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n+name: CI',

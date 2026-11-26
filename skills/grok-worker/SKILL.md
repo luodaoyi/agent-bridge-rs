@@ -23,7 +23,7 @@ Resolve `<skill-dir>` as the directory containing this `SKILL.md` (`skills/grok-
 
 1. **Bootstrap**:
    - `<bridge> hooks status --worker grok` (install with `hooks install --worker grok` if false).
-   - `<bridge> server status` (start with `server start` if stopped).
+   - `<bridge> server status` (start with `server start` if stopped; if the host's process container/Job Object terminates detached processes between tool calls, run `<bridge> server run` as a persistent background daemon task instead).
 2. **Plan & Dispatch**:
    - AGY writes a bounded delegation contract (objective, allowed write set, acceptance criteria, required checks, constraints) flattened to one line:
    ```text

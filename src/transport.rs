@@ -39,10 +39,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(windows)]
 use windows_sys::Win32::{
-    Foundation::CloseHandle,
+    Foundation::{CloseHandle, ERROR_ACCESS_DENIED},
     System::Threading::{
-        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateProcessW, PROCESS_INFORMATION,
-        STARTUPINFOW,
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateProcessW,
+        PROCESS_INFORMATION, STARTUPINFOW,
     },
 };
 
@@ -630,33 +630,70 @@ pub(crate) fn write_response_with_deadline(
 }
 
 #[cfg(windows)]
+fn detached_server_creation_flags() -> [u32; 2] {
+    let base = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
+    [base | CREATE_BREAKAWAY_FROM_JOB, base]
+}
+
+#[cfg(windows)]
+fn should_retry_without_breakaway(raw_os_error: Option<i32>) -> bool {
+    raw_os_error == Some(ERROR_ACCESS_DENIED as i32)
+}
+
+#[cfg(windows)]
 fn start_detached_server() -> Result<()> {
     let executable = env::current_exe().context("failed to locate agent-bridge executable")?;
     let mut application = executable.as_os_str().encode_wide().collect::<Vec<_>>();
     application.push(0);
-    let mut command_line = OsString::from(format!("\"{}\" __server", executable.display()))
-        .encode_wide()
-        .collect::<Vec<_>>();
-    command_line.push(0);
+    let mut command_line_template =
+        OsString::from(format!("\"{}\" __server", executable.display()))
+            .encode_wide()
+            .collect::<Vec<_>>();
+    command_line_template.push(0);
     let startup = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
         ..Default::default()
     };
+    let flags = detached_server_creation_flags();
     let mut process = PROCESS_INFORMATION::default();
-    let created = unsafe {
+    let mut command_line = command_line_template.clone();
+    let mut created = unsafe {
         CreateProcessW(
             application.as_ptr(),
             command_line.as_mut_ptr(),
             std::ptr::null(),
             std::ptr::null(),
             0,
-            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+            flags[0],
             std::ptr::null(),
             std::ptr::null(),
             &startup,
             &mut process,
         )
     };
+    if created == 0 {
+        let error = std::io::Error::last_os_error();
+        if should_retry_without_breakaway(error.raw_os_error()) {
+            process = PROCESS_INFORMATION::default();
+            command_line = command_line_template;
+            created = unsafe {
+                CreateProcessW(
+                    application.as_ptr(),
+                    command_line.as_mut_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    flags[1],
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    &startup,
+                    &mut process,
+                )
+            };
+        } else {
+            return Err(error).context("failed to spawn runtime server");
+        }
+    }
     if created == 0 {
         return Err(std::io::Error::last_os_error()).context("failed to spawn runtime server");
     }
@@ -2181,5 +2218,20 @@ mod unix_ipc_tests {
             error.to_string().contains("runtime server is not running"),
             "{error:#}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_detached_server_flags_try_breakaway_then_fallback() {
+        let [with_breakaway, without_breakaway] = detached_server_creation_flags();
+        assert_ne!(with_breakaway & CREATE_BREAKAWAY_FROM_JOB, 0);
+        assert_eq!(without_breakaway & CREATE_BREAKAWAY_FROM_JOB, 0);
+        assert_ne!(without_breakaway & CREATE_NO_WINDOW, 0);
+        assert_ne!(without_breakaway & CREATE_NEW_PROCESS_GROUP, 0);
+        assert!(should_retry_without_breakaway(Some(
+            ERROR_ACCESS_DENIED as i32
+        )));
+        assert!(!should_retry_without_breakaway(Some(2)));
+        assert!(!should_retry_without_breakaway(None));
     }
 }

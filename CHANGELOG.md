@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.1 - 2026-11-26
+
 ## 0.9.0 - 2026-11-26
 
 - Refactored `grok-bridge-rs` into `agent-bridge-rs`, supporting a bounded 2×2 local runtime matrix: `Codex -> Grok`, `AGY -> Codex`, and `AGY -> Grok` with binary `agent-bridge`, IPC identity `agent-bridge-runtime-v1-*`, and WebUI port `127.0.0.1:47654`.

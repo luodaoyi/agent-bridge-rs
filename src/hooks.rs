@@ -233,8 +233,18 @@ pub(crate) fn install_for(worker: WorkerKind) -> Result<HookInstallStatus> {
 
 pub(crate) fn status_for(worker: WorkerKind) -> Result<HookInstallStatus> {
     let path = hook_file_path(worker)?;
-    let command = current_hook_command(worker)?;
-    let mut status = status_at(worker, &path, &command)?;
+    let mut candidates = vec![current_hook_command(worker)?];
+    if let Ok(paths) = crate::install::Paths::discover() {
+        for binary in [paths.agy_binary, paths.codex_binary] {
+            if binary.is_file()
+                && let Ok(command) = hook_command(worker, &binary)
+                && !candidates.contains(&command)
+            {
+                candidates.push(command);
+            }
+        }
+    }
+    let mut status = status_at_candidates(worker, &path, &candidates)?;
     if worker == WorkerKind::Grok {
         status.legacy_grok_bridge_path = legacy_grok_hook_path().map(|p| p.display().to_string());
     }
@@ -558,11 +568,35 @@ fn install_at(worker: WorkerKind, path: &Path, command: &str) -> Result<HookInst
 }
 
 fn status_at(worker: WorkerKind, path: &Path, command: &str) -> Result<HookInstallStatus> {
+    status_at_candidates(worker, path, &[command.to_owned()])
+}
+
+fn status_at_candidates(
+    worker: WorkerKind,
+    path: &Path,
+    commands: &[String],
+) -> Result<HookInstallStatus> {
     let Some(document) = load_document(path)? else {
         return Ok(empty_status(worker, path));
     };
     validate_document(&document)?;
-    Ok(inspect_document(worker, path, &document, command))
+    let Some(first) = commands.first() else {
+        return Ok(empty_status(worker, path));
+    };
+    let mut best = inspect_document(worker, path, &document, first);
+    if best.installed {
+        return Ok(best);
+    }
+    for command in &commands[1..] {
+        let candidate = inspect_document(worker, path, &document, command);
+        if candidate.installed {
+            return Ok(candidate);
+        }
+        if candidate.events_found > best.events_found {
+            best = candidate;
+        }
+    }
+    Ok(best)
 }
 
 fn uninstall_at(worker: WorkerKind, path: &Path, command: &str) -> Result<HookInstallStatus> {
@@ -1217,5 +1251,68 @@ mod tests {
         .unwrap();
         assert_eq!(found, legacy);
         assert!(found.exists());
+    }
+
+    #[test]
+    fn status_at_candidates_matches_deployed_binary_when_caller_differs() {
+        let directory = TestDir::new();
+        let grok_path = directory.0.join("grok-hooks.json");
+        let codex_path = directory.0.join("codex-hooks.json");
+        let caller_bin = directory.0.join("npm").join("agent-bridge");
+        let deployed_bin = directory.0.join("plugin").join("agent-bridge");
+        let caller_grok = hook_command(WorkerKind::Grok, &caller_bin).unwrap();
+        let deployed_grok = hook_command(WorkerKind::Grok, &deployed_bin).unwrap();
+        let caller_codex = hook_command(WorkerKind::Codex, &caller_bin).unwrap();
+        let deployed_codex = hook_command(WorkerKind::Codex, &deployed_bin).unwrap();
+
+        assert!(
+            install_at(WorkerKind::Grok, &grok_path, &deployed_grok)
+                .unwrap()
+                .installed
+        );
+        assert!(
+            install_at(WorkerKind::Codex, &codex_path, &deployed_codex)
+                .unwrap()
+                .installed
+        );
+
+        let grok_status =
+            status_at_candidates(WorkerKind::Grok, &grok_path, &[caller_grok, deployed_grok])
+                .unwrap();
+        assert!(grok_status.installed);
+        assert_eq!(grok_status.events_found, grok_status.events_expected);
+
+        let codex_status = status_at_candidates(
+            WorkerKind::Codex,
+            &codex_path,
+            &[caller_codex, deployed_codex],
+        )
+        .unwrap();
+        assert!(codex_status.installed);
+        assert_eq!(codex_status.events_found, codex_status.events_expected);
+    }
+
+    #[test]
+    fn status_at_candidates_rejects_mixed_binaries_as_not_installed() {
+        let directory = TestDir::new();
+        let codex_path = directory.0.join("codex-hooks.json");
+        let caller_bin = directory.0.join("npm").join("agent-bridge");
+        let deployed_bin = directory.0.join("plugin").join("agent-bridge");
+        let caller_codex = hook_command(WorkerKind::Codex, &caller_bin).unwrap();
+        let deployed_codex = hook_command(WorkerKind::Codex, &deployed_bin).unwrap();
+
+        install_at(WorkerKind::Codex, &codex_path, &deployed_codex).unwrap();
+        let mut document = load_document(&codex_path).unwrap().unwrap();
+        document["hooks"]["Stop"][0]["hooks"][0]["command"] = Value::String(caller_codex.clone());
+        write_document(&codex_path, &document).unwrap();
+
+        let status = status_at_candidates(
+            WorkerKind::Codex,
+            &codex_path,
+            &[caller_codex, deployed_codex],
+        )
+        .unwrap();
+        assert!(!status.installed);
+        assert!(status.events_found < status.events_expected);
     }
 }

@@ -316,11 +316,12 @@ mod app {
 
     fn parse_server(arguments: &[OsString]) -> Result<Action> {
         let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
-            bail!("server requires start, status, stop, or ui");
+            bail!("server requires start, run, status, stop, or ui");
         };
         ensure_no_arguments(&arguments[1..])?;
         match command {
             "start" => rpc(Request::ServerStatus, true),
+            "run" => Ok(Action::InternalServer),
             "status" => rpc(Request::ServerStatus, false),
             "stop" => rpc(Request::ServerStop, false),
             "ui" => Ok(Action::ServerUi),
@@ -755,7 +756,7 @@ mod app {
 
     fn print_help() {
         println!(
-            "agent-bridge {}\n\nUSAGE:\n  agent-bridge ui                                   # 打开中文 TUI 安装配置界面\n  agent-bridge install [--target all|codex|agy]     # 部署 Codex Skill / AGY Plugin 与 Hooks\n  agent-bridge status install                       # 显示安装状态（JSON）\n  agent-bridge uninstall [--target all|codex|agy]   # 移除 agent-bridge Hooks 配置\n  agent-bridge hooks install|status|uninstall [--worker all|grok|codex]\n  agent-bridge server start|status|stop|ui\n  agent-bridge create --worker grok|codex [--cwd <path>] [--prompt <text>] [--model <model>] [--owner <title>] [--always-approve] [--sandbox read-only|workspace-write|danger-full-access] [--dangerously-bypass]\n  agent-bridge list\n  agent-bridge heartbeat\n  agent-bridge close-client                         # 兼容别名: close-codex\n  agent-bridge show --session <handle>\n  agent-bridge read --session <handle> [--cursor <n>] [--limit <bytes>] [--wait-ms <n>]\n  agent-bridge send --session <handle> (--text <text> | --interrupt)\n  agent-bridge write --session <handle> --data-base64 <base64>\n  agent-bridge resize --session <handle> --cols <n> --rows <n>\n  agent-bridge wait --session <handle> --for tui-idle|exit [--timeout-ms <n>]\n  agent-bridge close --session <handle>\n  agent-bridge terminal --session <handle>\n  agent-bridge terminal --worker grok|codex [--cwd <path>] [--prompt <text>] [--model <model>] [--owner <title>] [--always-approve] [--sandbox ...] [--dangerously-bypass]\n  agent-bridge doctor [--worker all|grok|codex]\n\nNPM GLOBAL 安装：\n  pnpm add -g agent-bridge-rs@latest\n  agent-bridge                        # 自动打开 TUI\n\n支持双宿主（Codex / Antigravity）与双执行器（Grok Build / Codex CLI）。`create` 与创建态 `terminal` 必须显式指定 `--worker grok|codex`。RPC 自动识别 CODEX_THREAD_ID / CODEX_SESSION_ID / ANTIGRAVITY_CONVERSATION_ID 租约；`close-client`（别名 `close-codex`）只关闭当前宿主会话派生的子进程。默认 WebUI 端口 127.0.0.1:47654。",
+            "agent-bridge {}\n\nUSAGE:\n  agent-bridge ui                                   # 打开中文 TUI 安装配置界面\n  agent-bridge install [--target all|codex|agy]     # 部署 Codex Skill / AGY Plugin 与 Hooks\n  agent-bridge status install                       # 显示安装状态（JSON）\n  agent-bridge uninstall [--target all|codex|agy]   # 移除 agent-bridge Hooks 配置\n  agent-bridge hooks install|status|uninstall [--worker all|grok|codex]\n  agent-bridge server start|run|status|stop|ui\n  agent-bridge create --worker grok|codex [--cwd <path>] [--prompt <text>] [--model <model>] [--owner <title>] [--always-approve] [--sandbox read-only|workspace-write|danger-full-access] [--dangerously-bypass]\n  agent-bridge list\n  agent-bridge heartbeat\n  agent-bridge close-client                         # 兼容别名: close-codex\n  agent-bridge show --session <handle>\n  agent-bridge read --session <handle> [--cursor <n>] [--limit <bytes>] [--wait-ms <n>]\n  agent-bridge send --session <handle> (--text <text> | --interrupt)\n  agent-bridge write --session <handle> --data-base64 <base64>\n  agent-bridge resize --session <handle> --cols <n> --rows <n>\n  agent-bridge wait --session <handle> --for tui-idle|exit [--timeout-ms <n>]\n  agent-bridge close --session <handle>\n  agent-bridge terminal --session <handle>\n  agent-bridge terminal --worker grok|codex [--cwd <path>] [--prompt <text>] [--model <model>] [--owner <title>] [--always-approve] [--sandbox ...] [--dangerously-bypass]\n  agent-bridge doctor [--worker all|grok|codex]\n\nNPM GLOBAL 安装：\n  pnpm add -g agent-bridge-rs@latest\n  agent-bridge                        # 自动打开 TUI\n\n支持双宿主（Codex / Antigravity）与双执行器（Grok Build / Codex CLI）。`create` 与创建态 `terminal` 必须显式指定 `--worker grok|codex`。RPC 自动识别 CODEX_THREAD_ID / CODEX_SESSION_ID / ANTIGRAVITY_CONVERSATION_ID 租约；`close-client`（别名 `close-codex`）只关闭当前宿主会话派生的子进程。默认 WebUI 端口 127.0.0.1:47654。",
             env!("CARGO_PKG_VERSION")
         );
     }
@@ -1011,6 +1012,15 @@ mod app {
                     ..
                 }) if prompt == "修复中文"
             ));
+        }
+
+        #[test]
+        fn parses_server_run_foreground_command() {
+            assert!(matches!(
+                parse_args(vec!["server".into(), "run".into()]).unwrap(),
+                Action::InternalServer
+            ));
+            assert!(parse_args(vec!["server".into(), "run".into(), "--extra".into()]).is_err());
         }
     }
 }
