@@ -70,6 +70,16 @@ function collectFiles(rootDir, subDir, predicate) {
   return results;
 }
 
+function countLines(content) {
+  if (!content) {
+    return 0;
+  }
+  const normalized = content.endsWith('\n')
+    ? content.slice(0, content.endsWith('\r\n') ? -2 : -1)
+    : content;
+  return normalized.length === 0 ? 1 : normalized.split(/\r?\n/).length;
+}
+
 export function validateProductionLimits(rootDir, { maxLines = DEFAULT_MAX_PROD_LINES } = {}) {
   const errors = [];
   const rustProd = collectFiles(rootDir, 'src', (rel) => extname(rel) === '.rs' && isProductionRustPath(rel));
@@ -78,7 +88,7 @@ export function validateProductionLimits(rootDir, { maxLines = DEFAULT_MAX_PROD_
 
   for (const file of checked) {
     const content = readFileSync(file.abs, 'utf8');
-    const lineCount = content.length === 0 ? 0 : content.split(/\r?\n/).length;
+    const lineCount = countLines(content);
     if (lineCount > maxLines) {
       errors.push(`${file.rel}: ${lineCount} lines exceeds production limit of ${maxLines} lines`);
     }
@@ -135,19 +145,25 @@ export function validateLessons(rootDir) {
   return { ok: errors.length === 0, errors, checkedEntries: matches.length };
 }
 
-function stripFencedCodeBlocks(markdown) {
+function splitMarkdownByFences(markdown) {
   const lines = String(markdown || '').split(/\r?\n/);
-  const kept = [];
+  const proseLines = [];
+  const fencedLines = [];
   let inFence = false;
   for (const line of lines) {
     if (/^\s*```/.test(line)) {
       inFence = !inFence;
-      kept.push('');
+      proseLines.push('');
       continue;
     }
-    kept.push(inFence ? '' : line);
+    if (inFence) {
+      proseLines.push('');
+      fencedLines.push(line);
+    } else {
+      proseLines.push(line);
+    }
   }
-  return kept.join('\n');
+  return { prose: proseLines.join('\n'), fenced: fencedLines.join('\n') };
 }
 
 function parseDiffFiles(diffText) {
@@ -159,6 +175,7 @@ function parseDiffFiles(diffText) {
       current = {
         path: match ? match[2] : '',
         addedLines: [],
+        deletedLines: [],
         hunks: [],
         currentHunk: null,
       };
@@ -169,7 +186,12 @@ function parseDiffFiles(diffText) {
       continue;
     }
     if (line.startsWith('@@ ')) {
-      current.currentHunk = { header: line, lines: [] };
+      const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      current.currentHunk = {
+        header: line,
+        newStart: hunkMatch ? Number(hunkMatch[1]) : null,
+        lines: [],
+      };
       current.hunks.push(current.currentHunk);
       continue;
     }
@@ -179,7 +201,9 @@ function parseDiffFiles(diffText) {
       if (current.currentHunk) {
         current.currentHunk.lines.push({ added: true, text });
       }
-    } else if (current.currentHunk && !line.startsWith('-')) {
+    } else if (line.startsWith('-') && !line.startsWith('---')) {
+      current.deletedLines.push(line.slice(1));
+    } else if (current.currentHunk) {
       current.currentHunk.lines.push({ added: false, text: line.startsWith(' ') ? line.slice(1) : line });
     }
   }
@@ -196,68 +220,157 @@ function isSubstantiveScriptOrWebLine(line) {
   return trimmed !== '' && !trimmed.startsWith('//') && !trimmed.startsWith('/*') && !trimmed.startsWith('*');
 }
 
-function findProductionUnwraps(diffSections) {
+function stripRustCommentsAndStrings(line) {
+  let out = '';
+  let inStr = false;
+  let escape = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (inStr) {
+      if (escape) {
+        escape = false;
+      } else if (ch === '\\') {
+        escape = true;
+      } else if (ch === '"') {
+        inStr = false;
+      }
+      continue;
+    }
+    if (ch === '/' && line[i + 1] === '/') {
+      break;
+    }
+    if (ch === '"') {
+      inStr = true;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+function createRustScopeState(inTestBlock = false) {
+  return {
+    braceDepth: inTestBlock ? 1 : 0,
+    pendingCfgTest: false,
+    waitingForTestBrace: false,
+    inTestBlock,
+    testEntryDepth: 0,
+  };
+}
+
+function advanceRustScopeLine(state, rawLine) {
+  const code = stripRustCommentsAndStrings(rawLine);
+  if (/#\[cfg\([^)]*\btest\b[^)]*\)\]/.test(code)) {
+    state.pendingCfgTest = true;
+  }
+  if (!state.inTestBlock && !state.waitingForTestBrace) {
+    if ((state.pendingCfgTest && /\b(?:mod|fn)\s+\w+/.test(code)) || /\bmod\s+tests\b/.test(code)) {
+      state.waitingForTestBrace = true;
+      state.pendingCfgTest = false;
+    } else if (state.pendingCfgTest && /;\s*$/.test(code) && !code.includes('{')) {
+      state.pendingCfgTest = false;
+    }
+  }
+  let lineInTest = state.inTestBlock;
+  for (const ch of code) {
+    if (ch === '{') {
+      state.braceDepth += 1;
+      if (state.waitingForTestBrace) {
+        state.inTestBlock = true;
+        state.testEntryDepth = state.braceDepth - 1;
+        state.waitingForTestBrace = false;
+        lineInTest = true;
+      }
+    } else if (ch === '}') {
+      state.braceDepth = Math.max(0, state.braceDepth - 1);
+      if (state.inTestBlock && state.braceDepth <= state.testEntryDepth) {
+        state.inTestBlock = false;
+      }
+    }
+  }
+  return lineInTest || state.inTestBlock;
+}
+
+function resolveSectionSourceLines(relPosix, rootDir, sourceTexts) {
+  if (sourceTexts && Object.prototype.hasOwnProperty.call(sourceTexts, relPosix)) {
+    return String(sourceTexts[relPosix]).split(/\r?\n/);
+  }
+  if (rootDir) {
+    const absPath = join(rootDir, relPosix);
+    if (existsSync(absPath)) {
+      return readFileSync(absPath, 'utf8').split(/\r?\n/);
+    }
+  }
+  return null;
+}
+
+function findProductionUnwraps(diffSections, rootDir, sourceTexts) {
   const violations = [];
   for (const section of diffSections) {
     const relPosix = toPosix(section.path);
     if (!isProductionRustPath(relPosix)) {
       continue;
     }
-    // Fall back to addedLines when diff hunks lack @@ headers (synthetic tests).
-    const lines =
+    const sourceLines = resolveSectionSourceLines(relPosix, rootDir, sourceTexts);
+    const hunks =
       section.hunks.length > 0
-        ? section.hunks.flatMap((h) => [
-            { added: false, text: h.header, resetTestContext: true },
-            ...h.lines,
-          ])
-        : section.addedLines.map((text) => ({ added: true, text }));
+        ? section.hunks
+        : [{ header: '', newStart: null, lines: section.addedLines.map((text) => ({ added: true, text })) }];
 
-    let inTestBlock = false;
-    for (const entry of lines) {
-      if (entry.resetTestContext) {
-        inTestBlock = /mod tests|#\[cfg\(test\)\]/.test(entry.text);
-        continue;
+    for (const hunk of hunks) {
+      let state;
+      if (sourceLines && Number.isInteger(hunk.newStart) && hunk.newStart >= 1) {
+        state = createRustScopeState(false);
+        const prefixEnd = Math.min(hunk.newStart - 1, sourceLines.length);
+        for (let i = 0; i < prefixEnd; i += 1) {
+          advanceRustScopeLine(state, sourceLines[i]);
+        }
+      } else {
+        state = createRustScopeState(/\bmod\s+tests\b|#\[cfg\(test\)\]/.test(hunk.header));
       }
-      if (/#\[cfg\(test\)\]|\bmod\s+tests\b/.test(entry.text)) {
-        inTestBlock = true;
-      }
-      if (!entry.added || inTestBlock) {
-        continue;
-      }
-      const trimmed = entry.text.trim();
-      if (trimmed.startsWith('//') || trimmed.includes('governance: allow-unwrap')) {
-        continue;
-      }
-      if (/\.(?:unwrap|expect)\s*\(/.test(entry.text)) {
-        violations.push(`${relPosix}: added production .unwrap()/.expect() call: "${trimmed}"`);
+
+      for (const entry of hunk.lines) {
+        const lineInTest = advanceRustScopeLine(state, entry.text);
+        if (!entry.added || lineInTest) {
+          continue;
+        }
+        const trimmed = entry.text.trim();
+        if (trimmed.startsWith('//') || trimmed.includes('governance: allow-unwrap')) {
+          continue;
+        }
+        if (/\.(?:unwrap|expect)\s*\(/.test(entry.text)) {
+          violations.push(`${relPosix}: added production .unwrap()/.expect() call: "${trimmed}"`);
+        }
       }
     }
   }
   return violations;
 }
 
-export function validateDiff({ changedFiles, diffText, prBody = '' }) {
+export function validateDiff({ changedFiles, diffText, prBody = '', rootDir = null, sourceTexts = null }) {
   const errors = [];
   const normalizedChanged = changedFiles.map(toPosix);
   const diffSections = parseDiffFiles(diffText || '');
-  const noTestWaiver = /No-Test-Reason:\s*\S+/i.test(prBody);
+  // Strip HTML comments so template placeholder examples cannot satisfy waivers.
+  const activeBody = String(prBody || '').replace(/<!--[\s\S]*?-->/g, '');
+  const noTestWaiver = /No-Test-Reason:\s*\S+/i.test(activeBody);
 
   // 1. Check .github/workflows/** guard.
   const workflowFiles = normalizedChanged.filter((f) => f.startsWith('.github/workflows/'));
-  if (workflowFiles.length > 0 && !/Security-Boundary:\s*\S+/i.test(prBody)) {
+  if (workflowFiles.length > 0 && !/Security-Boundary:\s*\S+/i.test(activeBody)) {
     errors.push(
       `Workflow files modified (${workflowFiles.join(', ')}) without a "Security-Boundary: <reason>" statement`
     );
   }
 
   // 2. Check substantive Rust code changes have corresponding test changes & zero prod unwraps.
-  errors.push(...findProductionUnwraps(diffSections));
+  errors.push(...findProductionUnwraps(diffSections, rootDir, sourceTexts));
 
   const rustChanged = normalizedChanged.filter(isProductionRustPath);
   if (rustChanged.length > 0) {
     const hasSubstantiveSrc = diffSections
       .filter((s) => isProductionRustPath(toPosix(s.path)))
-      .some((s) => s.addedLines.some(isSubstantiveRustLine));
+      .some((s) => s.addedLines.some(isSubstantiveRustLine) || s.deletedLines.some(isSubstantiveRustLine));
     const hasRustTestFileChange = normalizedChanged.some(
       (f) => f.startsWith('test/') || f.startsWith('tests/') || isTestRustPath(f)
     );
@@ -279,7 +392,11 @@ export function validateDiff({ changedFiles, diffText, prBody = '' }) {
   if (webuiChanged.length > 0) {
     const hasSubstantiveWebui = diffSections
       .filter((s) => isProductionWebuiPath(toPosix(s.path)))
-      .some((s) => s.addedLines.some(isSubstantiveScriptOrWebLine));
+      .some(
+        (s) =>
+          s.addedLines.some(isSubstantiveScriptOrWebLine) ||
+          s.deletedLines.some(isSubstantiveScriptOrWebLine)
+      );
     const hasWebuiTestChange = normalizedChanged.some((f) => /^webui\/src\/.*\.test\.(?:js|jsx)$/.test(f));
     if (hasSubstantiveWebui && !hasWebuiTestChange && !noTestWaiver) {
       errors.push(
@@ -292,7 +409,11 @@ export function validateDiff({ changedFiles, diffText, prBody = '' }) {
   if (scriptsChanged.length > 0) {
     const hasSubstantiveScripts = diffSections
       .filter((s) => /^scripts\/.*\.mjs$/.test(toPosix(s.path)))
-      .some((s) => s.addedLines.some(isSubstantiveScriptOrWebLine));
+      .some(
+        (s) =>
+          s.addedLines.some(isSubstantiveScriptOrWebLine) ||
+          s.deletedLines.some(isSubstantiveScriptOrWebLine)
+      );
     const hasScriptTestChange = normalizedChanged.some((f) => /^test\/.*\.test\.js$/.test(f));
     if (hasSubstantiveScripts && !hasScriptTestChange && !noTestWaiver) {
       errors.push(
@@ -301,17 +422,23 @@ export function validateDiff({ changedFiles, diffText, prBody = '' }) {
     }
   }
 
-  // 4. Reject PR closing keywords wrapped in inline backticks without an unquoted keyword.
-  const prProse = stripFencedCodeBlocks(prBody);
+  // 4. Reject PR closing keywords inside inline backticks or fenced code blocks without unquoted prose.
+  const { prose: prProse, fenced: prFenced } = splitMarkdownByFences(activeBody);
   const withoutInlineCode = prProse.replace(/`[^`\r\n]+`/g, ' ');
   const bareClosedRefs = new Set();
   for (const m of withoutInlineCode.matchAll(/\b(?:fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)\s+#(\d+)\b/gi)) {
     bareClosedRefs.add(m[1]);
   }
-  for (const m of prProse.matchAll(/`(?:fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)\s+#(\d+)`/gi)) {
-    if (!bareClosedRefs.has(m[1])) {
+  const quotedClosingMatches = [
+    ...prProse.matchAll(/`(?:fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)\s+#(\d+)`/gi),
+    ...prFenced.matchAll(/\b(?:fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)\s+#(\d+)\b/gi),
+  ];
+  const reportedQuotedIssues = new Set();
+  for (const m of quotedClosingMatches) {
+    if (!bareClosedRefs.has(m[1]) && !reportedQuotedIssues.has(m[1])) {
+      reportedQuotedIssues.add(m[1]);
       errors.push(
-        `PR body wraps closing keyword for #${m[1]} in backticks ("${m[0]}"); remove backticks so GitHub auto-closes the issue`
+        `PR body wraps closing keyword for #${m[1]} in backticks or a fenced block ("${m[0]}"); move it to plain prose so GitHub auto-closes the issue`
       );
     }
   }
@@ -321,7 +448,7 @@ export function validateDiff({ changedFiles, diffText, prBody = '' }) {
   if (
     runtimeChanged.length > 0 &&
     !normalizedChanged.includes('CHANGELOG.md') &&
-    !/No-Changelog-Reason:\s*\S+/i.test(prBody)
+    !/No-Changelog-Reason:\s*\S+/i.test(activeBody)
   ) {
     errors.push(
       `User-facing runtime changes (${runtimeChanged.join(', ')}) without CHANGELOG.md update or "No-Changelog-Reason: <explanation>"`

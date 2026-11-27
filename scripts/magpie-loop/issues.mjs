@@ -170,21 +170,25 @@ export function buildAdhocIssue({ task, title }) {
   };
 }
 
+export function formatIssueComments(comments) {
+  const list = Array.isArray(comments) ? comments : [];
+  if (list.length === 0) {
+    return '(none)';
+  }
+  return list
+    .map((c, idx) => {
+      const author = c.author?.login || c.user?.login || 'unknown';
+      return `--- Comment ${idx + 1} by @${author} (${c.createdAt || ''}) ---\n${c.body || ''}`;
+    })
+    .join('\n\n');
+}
+
 export function buildFixPrompt({ issue, attempt, previousFailure }) {
   const isAdhoc = issue.number === null || issue.number === undefined;
   const targetHeader = isAdhoc
     ? `Ad-hoc Task: ${issue.title}`
     : `GitHub Issue #${issue.number}: ${issue.title}`;
-  const comments = Array.isArray(issue.comments) ? issue.comments : [];
-  const formattedComments =
-    comments.length === 0
-      ? '(none)'
-      : comments
-          .map((c, idx) => {
-            const author = c.author?.login || c.user?.login || 'unknown';
-            return `--- Comment ${idx + 1} by @${author} (${c.createdAt || ''}) ---\n${c.body || ''}`;
-          })
-          .join('\n\n');
+  const formattedComments = formatIssueComments(issue.comments);
 
   const retrySection = previousFailure
     ? `\n## Previous Attempt (${attempt - 1}) Verification Failure\nFix the exact failures below before finishing:\n\`\`\`\n${previousFailure.slice(-4000)}\n\`\`\`\n`

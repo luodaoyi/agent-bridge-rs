@@ -22,6 +22,7 @@ import {
 import {
   buildAdhocIssue,
   buildFixPrompt,
+  buildSelfReviewPrompt,
   detectHoldComment,
   evaluateSelfReviewOutput,
   formatCommitAndPrBody,
@@ -226,12 +227,18 @@ test('validateProductionLimits passes on repository root and catches >600-line p
   try {
     mkdirSync(join(dir, 'src'), { recursive: true });
     mkdirSync(join(dir, 'scripts'), { recursive: true });
-    writeFileSync(join(dir, 'src', 'huge.rs'), `${'fn x() {}\n'.repeat(601)}`);
+    writeFileSync(join(dir, 'src', 'exact600_nl.rs'), `${'fn x() {}\n'.repeat(600)}`);
+    writeFileSync(join(dir, 'src', 'exact600_no_nl.rs'), `${'fn x() {}\n'.repeat(599)}fn x() {}`);
+    writeFileSync(join(dir, 'src', 'over601_nl.rs'), `${'fn x() {}\n'.repeat(601)}`);
+    writeFileSync(join(dir, 'src', 'over601_no_nl.rs'), `${'fn x() {}\n'.repeat(600)}fn x() {}`);
     writeFileSync(join(dir, 'src', 'tests.rs'), `${'fn t() {}\n'.repeat(700)}`);
     writeFileSync(join(dir, 'scripts', 'big.mjs'), `${'const x = 1;\n'.repeat(605)}`);
     const res = validateProductionLimits(dir);
     assert.equal(res.ok, false);
-    assert.ok(res.errors.some((e) => e.includes('src/huge.rs')));
+    assert.ok(!res.errors.some((e) => e.includes('src/exact600_nl.rs')), res.errors.join('\n'));
+    assert.ok(!res.errors.some((e) => e.includes('src/exact600_no_nl.rs')), res.errors.join('\n'));
+    assert.ok(res.errors.some((e) => e.includes('src/over601_nl.rs')));
+    assert.ok(res.errors.some((e) => e.includes('src/over601_no_nl.rs')));
     assert.ok(res.errors.some((e) => e.includes('scripts/big.mjs')));
     assert.ok(!res.errors.some((e) => e.includes('src/tests.rs')));
   } finally {
@@ -316,6 +323,95 @@ test('validateDiff enforces prod unwrap, webui/script test coverage, backtick cl
   });
   assert.equal(missingChangelog.ok, false);
   assert.ok(missingChangelog.errors.some((e) => e.includes('CHANGELOG.md')));
+
+  // Template HTML comments must not satisfy No-Test-Reason / No-Changelog-Reason / Security-Boundary.
+  const htmlCommentWaiverIgnored = validateDiff({
+    changedFiles: ['.github/workflows/ci.yml', 'scripts/check-governance.mjs', 'src/worker.rs'],
+    diffText: [
+      'diff --git a/scripts/check-governance.mjs b/scripts/check-governance.mjs',
+      '@@ -1 +1,2 @@',
+      '+export const added = 1;',
+      'diff --git a/src/worker.rs b/src/worker.rs',
+      '@@ -1 +1,2 @@',
+      '+pub fn added() {}',
+    ].join('\n'),
+    prBody: [
+      '<!-- No-Test-Reason: example comment -->',
+      '<!-- No-Changelog-Reason: example comment -->',
+      '<!-- Security-Boundary: example comment -->',
+    ].join('\n'),
+  });
+  assert.equal(htmlCommentWaiverIgnored.ok, false);
+  assert.ok(htmlCommentWaiverIgnored.errors.some((e) => e.includes('Security-Boundary')));
+  assert.ok(htmlCommentWaiverIgnored.errors.some((e) => e.includes('No-Test-Reason')));
+  assert.ok(htmlCommentWaiverIgnored.errors.some((e) => e.includes('CHANGELOG.md')));
+
+  // Deleting substantive lines in scripts or webui without tests must trigger test guard.
+  const deletedScriptLine = validateDiff({
+    changedFiles: ['scripts/lessons-audit.mjs'],
+    diffText: 'diff --git a/scripts/lessons-audit.mjs b/scripts/lessons-audit.mjs\n@@ -1,2 +1 @@\n-validateInput(input);\n // keep',
+    prBody: '',
+  });
+  assert.equal(deletedScriptLine.ok, false);
+  assert.ok(deletedScriptLine.errors.some((e) => e.includes('test/*.test.js')));
+
+  const deletedWebuiLine = validateDiff({
+    changedFiles: ['webui/src/App.jsx', 'CHANGELOG.md'],
+    diffText: 'diff --git a/webui/src/App.jsx b/webui/src/App.jsx\n@@ -1,2 +1 @@\n-renderPanel();\n // keep',
+    prBody: '',
+  });
+  assert.equal(deletedWebuiLine.ok, false);
+  assert.ok(deletedWebuiLine.errors.some((e) => e.includes('webui test')));
+
+  // Fenced code blocks wrapping closing keywords without plain prose reference must be rejected.
+  const fencedClosingOnly = validateDiff({
+    changedFiles: ['README.md'],
+    diffText: 'diff --git a/README.md b/README.md\n@@ -1 +1 @@\n+docs',
+    prBody: 'Summary:\n```\nFixes #36\n```',
+  });
+  assert.equal(fencedClosingOnly.ok, false);
+  assert.ok(fencedClosingOnly.errors.some((e) => e.includes('fenced block')));
+
+  // Rust scope tracking: exiting #[cfg(test)] mod tests restores prod unwrap check;
+  // editing inside an existing long inline mod tests block uses sourceTexts scope.
+  const prodAfterTestsBlocked = validateDiff({
+    changedFiles: ['src/foo.rs', 'CHANGELOG.md'],
+    diffText: [
+      'diff --git a/src/foo.rs b/src/foo.rs',
+      '@@ -50,1 +50,6 @@',
+      '+#[cfg(test)]',
+      '+mod tests {',
+      '+    #[test] fn ok() { assert_eq!(Some(1).unwrap(), 1); }',
+      '+}',
+      '+fn prod_after() { let _ = Some(1).unwrap(); }',
+    ].join('\n'),
+    prBody: '',
+  });
+  assert.equal(prodAfterTestsBlocked.ok, false);
+  assert.ok(prodAfterTestsBlocked.errors.some((e) => e.includes('.unwrap()')));
+
+  const insideLongTestModuleAllowed = validateDiff({
+    changedFiles: ['src/foo.rs', 'CHANGELOG.md'],
+    diffText: [
+      'diff --git a/src/foo.rs b/src/foo.rs',
+      '@@ -6,1 +6,2 @@ fn helper_in_long_test() {',
+      '+        assert_eq!(Some(1).unwrap(), 1);',
+    ].join('\n'),
+    sourceTexts: {
+      'src/foo.rs': [
+        'pub fn prod() {}',
+        '#[cfg(test)]',
+        'mod tests {',
+        '    #[test]',
+        '    fn long_test() {',
+        '        assert_eq!(Some(1).unwrap(), 1);',
+        '    }',
+        '}',
+      ].join('\n'),
+    },
+    prBody: '',
+  });
+  assert.equal(insideLongTestModuleAllowed.ok, true, insideLongTestModuleAllowed.errors.join('\n'));
 });
 
 test('magpie-loop fail-closed self-review and webui/dist bootstrap checks behave deterministically', () => {
@@ -325,6 +421,8 @@ test('magpie-loop fail-closed self-review and webui/dist bootstrap checks behave
 
   assert.equal(evaluateSelfReviewOutput({ exitStatus: 1, rawOutput: '{"verdict":"approve"}' }).ok, false);
   assert.equal(evaluateSelfReviewOutput({ exitStatus: 0, rawOutput: 'not-json' }).ok, false);
+  assert.equal(evaluateSelfReviewOutput({ exitStatus: 0, rawOutput: 'null' }).ok, false);
+  assert.equal(evaluateSelfReviewOutput({ exitStatus: 0, rawOutput: '["approve"]' }).ok, false);
   assert.equal(
     evaluateSelfReviewOutput({
       exitStatus: 0,
@@ -339,6 +437,27 @@ test('magpie-loop fail-closed self-review and webui/dist bootstrap checks behave
     }).ok,
     true
   );
+
+  const adhocPrompt = buildSelfReviewPrompt({
+    issue: {
+      number: null,
+      title: 'Short adhoc title',
+      body: 'AC-1: must reject empty token\nAC-2: must return 401',
+      comments: [],
+    },
+  });
+  assert.match(adhocPrompt, /AC-1: must reject empty token/);
+
+  const issuePrompt = buildSelfReviewPrompt({
+    issue: {
+      number: 41,
+      title: 'Fix hook delivery',
+      body: 'AC-1: fallback HTTP works',
+      comments: [{ author: { login: 'maintainer' }, createdAt: '2026-11-27', body: 'Do not break IPC' }],
+    },
+  });
+  assert.match(issuePrompt, /AC-1: fallback HTTP works/);
+  assert.match(issuePrompt, /Do not break IPC/);
 });
 
 test('lessons-audit parses metadata, finds Seen>=3 active candidates, and flags rework commits', () => {

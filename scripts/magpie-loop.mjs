@@ -16,7 +16,7 @@ export {
   selectNextIssue,
 } from './magpie-loop/issues.mjs';
 export { needsWebuiDistBootstrap, unwrapWindowsCmdShim } from './magpie-loop/execution.mjs';
-export { evaluateSelfReviewOutput } from './magpie-loop/workflow.mjs';
+export { buildSelfReviewPrompt, evaluateSelfReviewOutput } from './magpie-loop/workflow.mjs';
 
 function getRepoSlug(rootDir) {
   return execFileSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], {

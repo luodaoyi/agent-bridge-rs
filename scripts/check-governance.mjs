@@ -310,7 +310,7 @@ function runMain() {
       encoding: 'utf8',
       maxBuffer: 20 * 1024 * 1024,
     });
-    diffResult = validateDiff({ changedFiles, diffText, prBody });
+    diffResult = validateDiff({ changedFiles, diffText, prBody, rootDir });
   }
 
   const allErrors = [

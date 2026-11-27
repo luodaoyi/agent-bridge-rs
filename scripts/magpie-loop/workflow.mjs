@@ -1,8 +1,34 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { buildFixPrompt, detectHoldComment, formatCommitAndPrBody } from './issues.mjs';
+import {
+  buildFixPrompt,
+  detectHoldComment,
+  formatCommitAndPrBody,
+  formatIssueComments,
+} from './issues.mjs';
 import { invokeWorkerRunner, runCommand, runVerificationSuite } from './execution.mjs';
+
+export function buildSelfReviewPrompt({ issue }) {
+  const isAdhoc = issue.number === null || issue.number === undefined;
+  const targetLabel = isAdhoc ? `Ad-hoc Task: ${issue.title}` : `Issue #${issue.number}: ${issue.title}`;
+  const sections = [
+    `Review git diff in this worktree for ${targetLabel}.`,
+    '',
+    isAdhoc ? '## Task Description & Acceptance Criteria' : '## Issue Body & Acceptance Criteria',
+    issue.body || '(empty)',
+  ];
+  if (!isAdhoc) {
+    sections.push('', '## Issue Comments', formatIssueComments(issue.comments));
+  }
+  sections.push(
+    '',
+    '## Review Instructions',
+    'Verify EVERY Acceptance Criterion listed above one by one against git diff, tests, LESSONS.md, and docs/code-standards.md.',
+    'Output JSON only: {"verdict":"approve"|"request_changes","issues":["..."]}.'
+  );
+  return sections.join('\n');
+}
 
 export function evaluateSelfReviewOutput({ exitStatus, rawOutput }) {
   if (exitStatus !== 0) {
@@ -18,6 +44,12 @@ export function evaluateSelfReviewOutput({ exitStatus, rawOutput }) {
     parsed = JSON.parse(jsonCandidate);
   } catch (error) {
     return { ok: false, reason: `Self-review output was not valid JSON (fail-closed): ${error.message}` };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return {
+      ok: false,
+      reason: 'Self-review JSON output must be a JSON object (fail-closed)',
+    };
   }
   if (parsed.verdict === 'approve') {
     return { ok: true, reason: null };
@@ -146,12 +178,7 @@ export function processSingleIssue(rootDir, repo, issue, options) {
 
       if (options.selfReview) {
         const reviewFile = join(stateDir, `attempt-${attempt}-review.json`);
-        const targetLabel = isAdhoc ? `Ad-hoc Task: ${issue.title}` : `Issue #${issue.number}: ${issue.title}`;
-        const reviewPrompt = [
-          `Review git diff in this worktree for ${targetLabel}.`,
-          'Verify every Acceptance Criterion in the issue/task plus LESSONS.md and docs/code-standards.md.',
-          'Output JSON only: {"verdict":"approve"|"request_changes","issues":["..."]}.',
-        ].join('\n');
+        const reviewPrompt = buildSelfReviewPrompt({ issue });
         const reviewRes = invokeWorkerRunner({
           runner: options.runner === 'grok' ? 'codex' : options.runner,
           sandbox: 'read-only',
