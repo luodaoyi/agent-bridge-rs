@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.4 - 2026-11-27
+
 - Resolved WebUI severe flickering, xterm `DomRenderer` empty `?2026` synchronized-output DOM rebuild storms, WebSocket push/render storms, controlled `<summary>` toggle bounce, and read-only `terminal_resize` commands falsely refreshing supervisor leases (Issue #60, PR #61).
 - Isolated Codex `0.172+` `send --text` bracketed-paste writes from a 200ms delayed `\r` submit inside an atomic writer queue item so `PasteBurst` reliably submits follow-up prompts while preserving `pending_writer_bytes` admission/shutdown accounting (Issue #34, PR #62).
 
