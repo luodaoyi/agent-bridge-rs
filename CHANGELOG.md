@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Resolved WebUI severe flickering, xterm `DomRenderer` empty `?2026` synchronized-output DOM rebuild storms, WebSocket push/render storms, controlled `<summary>` toggle bounce, and read-only `terminal_resize` commands falsely refreshing supervisor leases (Issue #60, PR #61).
+- Isolated Codex `0.172+` `send --text` bracketed-paste writes from a 200ms delayed `\r` submit inside an atomic writer queue item so `PasteBurst` reliably submits follow-up prompts while preserving `pending_writer_bytes` admission/shutdown accounting (Issue #34, PR #62).
+
 ## 0.9.3 - 2026-11-27
 
 - Reset detached Windows server and gated worker launches from isolated host desktops (such as Antigravity's `WinSta0\exebox-*`) back to `WinSta0\Default` when reachable (with non-interactive fallback) and pass `--no-daemon` to supporting Windows `codex` CLIs so sessions do not attach to a lingering `exebox-*` `app-server` daemon, resolving Codex `[windows] sandbox = "mxc"` `-1073741502` (`STATUS_DLL_INIT_FAILED`) child crashes under default `-s workspace-write` (Issue #36).
