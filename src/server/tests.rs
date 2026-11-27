@@ -561,6 +561,7 @@ fn events_websocket_handshake_rejects_bad_origin_and_path() {
         connection_upgrade: false,
         sec_websocket_key: Some("dGhlIHNhbXBsZSBub25jZQ==".to_owned()),
         sec_websocket_version: Some("13".to_owned()),
+        ..Default::default()
     };
     assert!(validate_events_websocket_request(&missing_upgrade).is_err());
 
@@ -597,6 +598,7 @@ fn events_websocket_handshake_accepts_same_origin_loopback() {
         connection_upgrade: true,
         sec_websocket_key: Some("dGhlIHNhbXBsZSBub25jZQ==".to_owned()),
         sec_websocket_version: Some("13".to_owned()),
+        ..Default::default()
     };
     assert!(validate_events_websocket_request(&request).is_ok());
 }
@@ -625,6 +627,7 @@ fn sec_websocket_key_must_be_rfc6455_16_byte_base64() {
         connection_upgrade: true,
         sec_websocket_key: Some("YWJj".to_owned()),
         sec_websocket_version: Some("13".to_owned()),
+        ..Default::default()
     };
     assert_eq!(
         validate_events_websocket_request(&request).unwrap_err(),
@@ -1068,6 +1071,7 @@ fn serve_web_request_with_host(request: &[u8], host: SessionHost) -> Vec<u8> {
                 started_at_ms: 0,
                 stopping: AtomicBool::new(false),
                 web_url: None,
+                hook_token: "test-hook-token".to_owned(),
                 version_checker: Arc::new(VersionChecker::new()),
                 web_connections: AtomicUsize::new(0),
                 ipc_connections: AtomicUsize::new(0),
@@ -1079,6 +1083,53 @@ fn serve_web_request_with_host(request: &[u8], host: SessionHost) -> Vec<u8> {
     client.read_to_end(&mut response).unwrap();
     handler.join().unwrap();
     response
+}
+
+#[test]
+fn hook_http_endpoint_enforces_token_origin_and_validates_payload() {
+    let payload = br#"{"worker":"codex","provider_session_id":"01234567-89ab-4def-8123-456789abcdef","event":{"kind":"stop"}}"#;
+    let len = payload.len();
+
+    let missing_token = format!(
+        "POST /api/hooks HTTP/1.1\r\nHost: 127.0.0.1:47654\r\nContent-Type: application/json\r\nContent-Length: {len}\r\n\r\n"
+    );
+    let mut missing_bytes = missing_token.into_bytes();
+    missing_bytes.extend_from_slice(payload);
+    assert!(serve_web_request(&missing_bytes).starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+
+    let wrong_token = format!(
+        "POST /api/hooks HTTP/1.1\r\nHost: 127.0.0.1:47654\r\nX-Agent-Bridge-Hook-Token: wrong\r\nContent-Type: application/json\r\nContent-Length: {len}\r\n\r\n"
+    );
+    let mut wrong_bytes = wrong_token.into_bytes();
+    wrong_bytes.extend_from_slice(payload);
+    assert!(serve_web_request(&wrong_bytes).starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+
+    let with_origin = format!(
+        "POST /api/hooks HTTP/1.1\r\nHost: 127.0.0.1:47654\r\nOrigin: http://127.0.0.1:47654\r\nX-Agent-Bridge-Hook-Token: test-hook-token\r\nContent-Type: application/json\r\nContent-Length: {len}\r\n\r\n"
+    );
+    let mut origin_bytes = with_origin.into_bytes();
+    origin_bytes.extend_from_slice(payload);
+    assert!(serve_web_request(&origin_bytes).starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+
+    let bad_uuid =
+        br#"{"worker":"codex","provider_session_id":"not-a-uuid","event":{"kind":"stop"}}"#;
+    let bad_req = format!(
+        "POST /api/hooks HTTP/1.1\r\nHost: 127.0.0.1:47654\r\nX-Agent-Bridge-Hook-Token: test-hook-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        bad_uuid.len()
+    );
+    let mut bad_bytes = bad_req.into_bytes();
+    bad_bytes.extend_from_slice(bad_uuid);
+    assert!(serve_web_request(&bad_bytes).starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
+
+    let valid_req = format!(
+        "POST /api/hooks HTTP/1.1\r\nHost: 127.0.0.1:47654\r\nX-Agent-Bridge-Hook-Token: test-hook-token\r\nContent-Type: application/json\r\nContent-Length: {len}\r\n\r\n"
+    );
+    let mut valid_bytes = valid_req.into_bytes();
+    valid_bytes.extend_from_slice(payload);
+    let response = serve_web_request(&valid_bytes);
+    let (headers, body) = split_http_response(&response);
+    assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"), "{headers}");
+    assert_eq!(body, br#"{"accepted":false}"#);
 }
 
 fn split_http_response(response: &[u8]) -> (&str, &[u8]) {

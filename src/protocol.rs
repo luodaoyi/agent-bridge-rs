@@ -336,6 +336,19 @@ pub(crate) struct ResponseError {
     pub(crate) message: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HookDiagnostics {
+    pub(crate) accepted_count: u64,
+    pub(crate) unmatched_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_unmatched_worker: Option<WorkerKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_unmatched_event: Option<HookEventKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_unmatched_at_ms: Option<u64>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ServerInfo {
@@ -345,6 +358,8 @@ pub(crate) struct ServerInfo {
     pub(crate) active_sessions: u32,
     pub(crate) web_url: Option<String>,
     pub(crate) stopping: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hook_diagnostics: Option<HookDiagnostics>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -770,7 +785,12 @@ pub(crate) fn validate_client_session_id(client_session_id: &str) -> Result<()> 
     Ok(())
 }
 
-fn validate_provider_session_id(provider_session_id: &str) -> Result<()> {
+pub(crate) fn validate_hook_request(provider_session_id: &str, event: &HookEvent) -> Result<()> {
+    validate_provider_session_id(provider_session_id)?;
+    validate_hook_event(event)
+}
+
+pub(crate) fn validate_provider_session_id(provider_session_id: &str) -> Result<()> {
     let valid = provider_session_id.len() == PROVIDER_SESSION_ID_BYTES
         && provider_session_id
             .bytes()

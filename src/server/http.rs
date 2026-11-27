@@ -10,6 +10,7 @@ use std::{
 use anyhow::{Context, Result};
 
 use crate::{
+    hooks::http_fallback::{HOOK_HTTP_ROUTE, HOOK_TOKEN_HEADER, MAX_HOOK_HTTP_BODY_BYTES},
     protocol::{validate_client_session_id, validate_owner},
     session::CloseError,
 };
@@ -20,7 +21,7 @@ use super::{
     WEB_HTTP_POLL, WEB_HTTP_READ_TIMEOUT, WEB_HTTP_REJECT_DEADLINE, WEB_HTTP_REQUEST_DEADLINE,
     WEB_HTTP_WRITE_POLL_MAX, WEB_HTTP_WRITE_POLL_MIN, WEB_HTTP_WRITE_TIMEOUT,
     WEB_MAX_ACTIVE_CONNECTIONS, WEB_UI_CSS, WEB_UI_HTML, WEB_UI_JS, admit_connection,
-    ws::handle_events_websocket,
+    hook_http::handle_hook_http_post, ws::handle_events_websocket,
 };
 
 /// Default WebUI listener. Kept loopback-only because the WebUI has no user
@@ -162,6 +163,9 @@ pub(super) fn handle_web_connection(mut stream: TcpStream, state: Arc<RuntimeSta
     let path = request.path.as_str();
     let bridge_header = request.bridge_header;
     match (method, path) {
+        ("POST", HOOK_HTTP_ROUTE) => {
+            handle_hook_http_post(&mut stream, &state, request);
+        }
         ("GET", "/api/sessions") => match state.host.list_web().and_then(|sessions| {
             serde_json::to_string(&sessions).context("failed to encode WebUI sessions")
         }) {
@@ -445,17 +449,20 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct ParsedHttpRequest {
     pub(super) method: String,
     pub(super) path: String,
     pub(super) bridge_header: bool,
+    pub(super) hook_token: Option<String>,
     pub(super) host: Option<String>,
     pub(super) origin: Option<String>,
     pub(super) upgrade_websocket: bool,
     pub(super) connection_upgrade: bool,
     pub(super) sec_websocket_key: Option<String>,
     pub(super) sec_websocket_version: Option<String>,
+    pub(super) body: Vec<u8>,
+    pub(super) body_error: Option<String>,
 }
 
 fn read_http_request(stream: &mut TcpStream) -> std::result::Result<ParsedHttpRequest, String> {
@@ -476,12 +483,15 @@ pub(super) fn read_http_request_with_deadline(
     let method = parts.next().ok_or("missing HTTP method")?.to_owned();
     let path = parts.next().ok_or("missing HTTP path")?.to_owned();
     let mut bridge_header = false;
+    let mut hook_token = None;
     let mut host = None;
     let mut origin = None;
     let mut upgrade_websocket = false;
     let mut connection_upgrade = false;
     let mut sec_websocket_key = None;
     let mut sec_websocket_version = None;
+    let mut content_length: Option<usize> = None;
+    let mut body_error: Option<String> = None;
     let mut header_count = 0usize;
     let mut header_bytes = 0usize;
     loop {
@@ -510,6 +520,18 @@ pub(super) fn read_http_request_with_deadline(
         let value = value.trim();
         if name.eq_ignore_ascii_case("X-Agent-Bridge-WebUI") && value == "1" {
             bridge_header = true;
+        } else if name.eq_ignore_ascii_case(HOOK_TOKEN_HEADER) {
+            hook_token = Some(value.to_owned());
+        } else if name.eq_ignore_ascii_case("Content-Length") {
+            match value.parse::<usize>() {
+                Ok(length) if length <= MAX_HOOK_HTTP_BODY_BYTES => content_length = Some(length),
+                Ok(_) => {
+                    body_error = Some(format!(
+                        "HTTP body exceeds the {MAX_HOOK_HTTP_BODY_BYTES}-byte size limit"
+                    ));
+                }
+                Err(_) => body_error = Some("invalid Content-Length header".to_owned()),
+            }
         } else if name.eq_ignore_ascii_case("Host") {
             host = Some(value.to_owned());
         } else if name.eq_ignore_ascii_case("Origin") {
@@ -526,17 +548,56 @@ pub(super) fn read_http_request_with_deadline(
             sec_websocket_version = Some(value.to_owned());
         }
     }
+    let body = if body_error.is_none()
+        && let Some(length) = content_length.filter(|&length| length > 0)
+    {
+        read_http_body(&mut reader, length, deadline)?
+    } else {
+        Vec::new()
+    };
     Ok(ParsedHttpRequest {
         method,
         path,
         bridge_header,
+        hook_token,
         host,
         origin,
         upgrade_websocket,
         connection_upgrade,
         sec_websocket_key,
         sec_websocket_version,
+        body,
+        body_error,
     })
+}
+
+fn read_http_body(
+    reader: &mut impl BufRead,
+    length: usize,
+    deadline: Instant,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut body = Vec::with_capacity(length);
+    while body.len() < length {
+        if Instant::now() >= deadline {
+            return Err("HTTP request body read timed out".to_owned());
+        }
+        let buffer = match reader.fill_buf() {
+            Ok(buffer) => buffer,
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                thread::sleep(WEB_HTTP_POLL);
+                continue;
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        if buffer.is_empty() {
+            return Err("unexpected EOF while reading HTTP request body".to_owned());
+        }
+        let needed = length - body.len();
+        let take = buffer.len().min(needed);
+        body.extend_from_slice(&buffer[..take]);
+        reader.consume(take);
+    }
+    Ok(body)
 }
 
 /// Read one CRLF/LF-terminated line with a hard byte cap and a wall-clock

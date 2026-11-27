@@ -399,6 +399,8 @@ pub(crate) fn blocked_reason(worker: WorkerKind, screen: &str) -> Option<&'stati
             } else if screen.contains("trust these hooks")
                 || screen.contains("untrusted hook")
                 || screen.contains("Allow this hook")
+                || screen.contains("Hooks need review")
+                || screen.contains("Trust all and continue")
             {
                 Some("codex-hook-trust")
             } else if screen.contains("Yes, proceed")
@@ -429,6 +431,14 @@ pub(crate) fn phase_from_title(worker: WorkerKind, title: Option<&str>) -> Optio
     }
     if lower == suffix || lower.ends_with(&hyphen_suffix) {
         return Some(SessionPhase::Idle);
+    }
+    if worker == WorkerKind::Codex {
+        if title_has_braille_spinner(title) {
+            return Some(SessionPhase::Running);
+        }
+        if lower == "ready" || lower.starts_with("ready |") {
+            return Some(SessionPhase::Idle);
+        }
     }
     None
 }
@@ -767,6 +777,28 @@ mod tests {
         assert_eq!(
             blocked_reason(WorkerKind::Codex, screen),
             Some("codex-trust-directory")
+        );
+    }
+
+    #[test]
+    fn detects_codex_0172_hook_review_prompt_and_ready_or_spinner_titles() {
+        let hook_screen =
+            "\n  Hooks need review\n\n  1. Review hooks\n› 2. Trust all and continue\n";
+        assert_eq!(
+            blocked_reason(WorkerKind::Codex, hook_screen),
+            Some("codex-hook-trust")
+        );
+        assert_eq!(
+            phase_from_title(WorkerKind::Codex, Some("Ready | Modularize Rust transport")),
+            Some(SessionPhase::Idle)
+        );
+        assert_eq!(
+            phase_from_title(WorkerKind::Codex, Some("Ready")),
+            Some(SessionPhase::Idle)
+        );
+        assert_eq!(
+            phase_from_title(WorkerKind::Codex, Some("⠋ Thinking...")),
+            Some(SessionPhase::Running)
         );
     }
 }
