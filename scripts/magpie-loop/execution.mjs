@@ -129,17 +129,39 @@ export function invokeWorkerRunner({ runner, sandbox, model, worktreeDir, prompt
   throw new Error(`Unsupported runner: ${runner}`);
 }
 
+function runResolvedCommand(stem, args, cwd, options = {}) {
+  const launch = unwrapWindowsCmdShim(resolveExecutableOnPath(stem));
+  return runCommand(launch.command, [...launch.prefixArgs, ...args], cwd, options);
+}
+
+export function needsWebuiDistBootstrap(changedFiles, distIndexExists) {
+  return !changedFiles.some((f) => f.startsWith('webui/')) && !distIndexExists;
+}
+
 export function runVerificationSuite(worktreeDir, changedFiles) {
   const checksRun = [];
+  const webuiDir = join(worktreeDir, 'webui');
+  const distIndexExists = existsSync(join(webuiDir, 'dist', 'index.html'));
 
   if (changedFiles.some((f) => f.startsWith('webui/'))) {
-    const webuiDir = join(worktreeDir, 'webui');
     for (const [label, args] of [
       ['cd webui && npm ci', ['ci']],
       ['cd webui && npm test', ['test']],
       ['cd webui && npm run build', ['run', 'build']],
     ]) {
-      const res = runCommand(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, webuiDir);
+      const res = runResolvedCommand('npm', args, webuiDir);
+      if (res.status !== 0) {
+        return { ok: false, checksRun, failure: `${label} failed:\n${res.stdout}\n${res.stderr}` };
+      }
+      checksRun.push(label);
+    }
+  } else if (needsWebuiDistBootstrap(changedFiles, distIndexExists)) {
+    // src/server.rs embeds webui/dist via include_bytes!, so fresh worktrees need dist built before cargo gates.
+    for (const [label, args] of [
+      ['cd webui && npm ci (bootstrap dist)', ['ci']],
+      ['cd webui && npm run build (bootstrap dist)', ['run', 'build']],
+    ]) {
+      const res = runResolvedCommand('npm', args, webuiDir);
       if (res.status !== 0) {
         return { ok: false, checksRun, failure: `${label} failed:\n${res.stdout}\n${res.stderr}` };
       }

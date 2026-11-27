@@ -53,6 +53,14 @@ body:
     validations:
       required: true
   - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Concrete verifiable criteria or regression cases required before closing.
+      placeholder: |
+        - [ ] Reproduction unit test fails before fix and passes after fix
+        - [ ] Verified behavior on target platform / surface
+  - type: textarea
     id: logs
     attributes:
       label: Raw screen / terminal output or JSON error

@@ -4,6 +4,13 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  validateDiff,
+  validateLessons,
+  validateProductionLimits,
+} from './governance/diff-and-lessons.mjs';
+
+export { validateDiff, validateLessons, validateProductionLimits };
 
 const PLATFORM_PACKAGE_DIRS = [
   'win32-x64',
@@ -15,14 +22,6 @@ const PLATFORM_PACKAGE_DIRS = [
 ];
 
 const STRICT_NO_LINE_ANCHOR_PREFIXES = ['docs/subsystems/', 'docs/code-standards.md'];
-
-const SECRET_PATTERNS = [
-  /\bghp_[A-Za-z0-9]{20,}\b/,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
-  /\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}\b/,
-  /\bnpm_[A-Za-z0-9]{20,}\b/,
-  /-----BEGIN (?:RSA |OPENSSH |EC |PGP )?PRIVATE KEY-----/,
-];
 
 function toPosix(p) {
   return p.replace(/\\/g, '/');
@@ -258,92 +257,6 @@ export function validateDocs(rootDir) {
   return { ok: errors.length === 0, errors, checkedFiles: files.length };
 }
 
-function parseDiffFiles(diffText) {
-  const sections = [];
-  let current = null;
-  for (const line of diffText.split(/\r?\n/)) {
-    if (line.startsWith('diff --git ')) {
-      const match = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
-      current = {
-        path: match ? match[2] : '',
-        addedLines: [],
-      };
-      sections.push(current);
-      continue;
-    }
-    if (!current) {
-      continue;
-    }
-    if (line.startsWith('+') && !line.startsWith('+++')) {
-      current.addedLines.push(line.slice(1));
-    }
-  }
-  return sections;
-}
-
-function isSubstantiveRustLine(line) {
-  const trimmed = line.trim();
-  return trimmed !== '' && !trimmed.startsWith('//');
-}
-
-export function validateDiff({ changedFiles, diffText, prBody = '' }) {
-  const errors = [];
-  const normalizedChanged = changedFiles.map(toPosix);
-  const diffSections = parseDiffFiles(diffText || '');
-
-  // 1. Check .github/workflows/** guard.
-  const workflowFiles = normalizedChanged.filter((f) => f.startsWith('.github/workflows/'));
-  if (workflowFiles.length > 0 && !/Security-Boundary:\s*\S+/i.test(prBody)) {
-    errors.push(
-      `Workflow files modified (${workflowFiles.join(', ')}) without a "Security-Boundary: <reason>" statement`
-    );
-  }
-
-  // 2. Check substantive Rust code changes have corresponding test changes unless explicitly waived.
-  const rustChanged = normalizedChanged.filter((f) => /^src\/.*\.rs$/.test(f));
-  if (rustChanged.length > 0) {
-    const hasSubstantiveSrc = diffSections
-      .filter((s) => /^src\/.*\.rs$/.test(toPosix(s.path)))
-      .some((s) => s.addedLines.some(isSubstantiveRustLine));
-
-    const hasTestFileChange = normalizedChanged.some(
-      (f) => f.startsWith('test/') || f.startsWith('tests/')
-    );
-    const hasInlineRustTestAddition = diffSections
-      .filter((s) => /^src\/.*\.rs$/.test(toPosix(s.path)))
-      .some((s) =>
-        s.addedLines.some((line) => /(?:#\[test\]|\bmod tests\b|\bassert[_a-z]*!)/.test(line))
-      );
-
-    const hasNoTestWaiver = /No-Test-Reason:\s*\S+/i.test(prBody);
-    if (hasSubstantiveSrc && !hasTestFileChange && !hasInlineRustTestAddition && !hasNoTestWaiver) {
-      errors.push(
-        `Substantive changes in ${rustChanged.join(', ')} without test additions or "No-Test-Reason: <explanation>"`
-      );
-    }
-  }
-
-  // 3. Scan added lines for accidental secret material.
-  for (const section of diffSections) {
-    const relPath = toPosix(section.path);
-    if (
-      relPath === 'scripts/check-governance.mjs' ||
-      relPath === 'test/governance.test.js'
-    ) {
-      continue;
-    }
-    for (const added of section.addedLines) {
-      for (const pattern of SECRET_PATTERNS) {
-        if (pattern.test(added)) {
-          errors.push(`Potential secret matched ${pattern} in added line of ${relPath}`);
-        }
-      }
-    }
-  }
-
-  return { ok: errors.length === 0, errors };
-}
-
 function parseArgs(argv) {
   const options = {
     diffBase: null,
@@ -376,6 +289,8 @@ function runMain() {
 
   const manifestResult = validateManifestsAndHooks(rootDir);
   const docsResult = validateDocs(rootDir);
+  const limitsResult = validateProductionLimits(rootDir);
+  const lessonsResult = validateLessons(rootDir);
   let diffResult = { ok: true, errors: [] };
 
   if (options.diffBase) {
@@ -395,14 +310,22 @@ function runMain() {
       encoding: 'utf8',
       maxBuffer: 20 * 1024 * 1024,
     });
-    diffResult = validateDiff({ changedFiles, diffText, prBody });
+    diffResult = validateDiff({ changedFiles, diffText, prBody, rootDir });
   }
 
-  const allErrors = [...manifestResult.errors, ...docsResult.errors, ...diffResult.errors];
+  const allErrors = [
+    ...manifestResult.errors,
+    ...docsResult.errors,
+    ...limitsResult.errors,
+    ...lessonsResult.errors,
+    ...diffResult.errors,
+  ];
   const report = {
     ok: allErrors.length === 0,
     version: manifestResult.version,
     docsChecked: docsResult.checkedFiles,
+    prodFilesChecked: limitsResult.checkedFiles,
+    lessonsChecked: lessonsResult.checkedEntries,
     errors: allErrors,
   };
 
@@ -410,7 +333,7 @@ function runMain() {
     console.log(JSON.stringify(report, null, 2));
   } else if (report.ok) {
     console.log(
-      `Governance OK: version=${report.version}, docsChecked=${report.docsChecked}, errors=0`
+      `Governance OK: version=${report.version}, docsChecked=${report.docsChecked}, prodFilesChecked=${report.prodFilesChecked}, lessonsChecked=${report.lessonsChecked}, errors=0`
     );
   } else {
     console.error(`Governance check failed (${allErrors.length} error(s)):`);

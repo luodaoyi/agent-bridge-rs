@@ -24,5 +24,13 @@ body:
     id: proposal
     attributes:
       label: Proposed behavior & acceptance criteria
+      placeholder: |
+        - [ ] Acceptance criterion 1
+        - [ ] Acceptance criterion 2
     validations:
       required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals / out of scope
+      description: Explicitly state what should NOT be changed or expanded (e.g. keep local-only daemon boundary).
