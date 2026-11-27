@@ -1,31 +1,23 @@
 use std::{
     env, fs,
-    io::{BufReader, Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
-use tempfile::NamedTempFile;
 
 use crate::{hooks, protocol::WorkerKind};
 
-const SKILL_DIR_NAME: &str = "agent-bridge";
-const PLUGIN_DIR_NAME: &str = "agent-bridge";
+mod assets;
+mod executable;
+mod paths;
+#[cfg(test)]
+mod tests;
 
-// Embedded host skill & plugin files
-const SKILL_MD: &str = include_str!("../SKILL.md");
-const CODEX_WORKER_SKILL_MD: &str = include_str!("../skills/codex-worker/SKILL.md");
-const GROK_WORKER_SKILL_MD: &str = include_str!("../skills/grok-worker/SKILL.md");
-const PLUGIN_JSON: &str = include_str!("../plugin.json");
-const README_MD: &str = include_str!("../README.md");
-const README_CN_MD: &str = include_str!("../README-CN.md");
-const AGENTS_OPENAI_YAML: &str = include_str!("../agents/openai.yaml");
-const HOOK_UNIX_GROK: &str = include_str!("../hooks/unix/agent-bridge-grok.json");
-const HOOK_WINDOWS_GROK: &str = include_str!("../hooks/windows/agent-bridge-grok.json");
-const HOOK_UNIX_CODEX: &str = include_str!("../hooks/unix/agent-bridge-codex.json");
-const HOOK_WINDOWS_CODEX: &str = include_str!("../hooks/windows/agent-bridge-codex.json");
+use assets::{extract_agy_plugin_files, extract_codex_skill_files};
+use executable::{copy_executable, same_file_contents};
+pub use paths::Paths;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstallTarget {
@@ -46,63 +38,6 @@ impl FromStr for InstallTarget {
                 bail!("unsupported install target: {other}; expected 'all', 'codex', or 'agy'")
             }
         }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Paths {
-    pub codex_skill_root: PathBuf,
-    pub codex_binary: PathBuf,
-    pub agy_plugin_root: PathBuf,
-    pub agy_binary: PathBuf,
-    pub grok_hooks_file: PathBuf,
-    pub codex_hooks_file: PathBuf,
-    pub legacy_grok_hooks_file: PathBuf,
-}
-
-impl Paths {
-    pub fn discover() -> Result<Self> {
-        let agents_dir = env::var_os("AGENTS_DIR")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|home| home.join(".agents")))
-            .ok_or_else(|| anyhow!("无法确定 Agent Skills 目录；请设置 AGENTS_DIR 或 HOME"))?;
-
-        let agy_config_dir = env::var_os("AGY_CONFIG_DIR")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|home| home.join(".gemini").join("config")))
-            .ok_or_else(|| anyhow!("无法确定 AGY 配置目录；请设置 AGY_CONFIG_DIR 或 HOME"))?;
-
-        let platform = current_platform_dir();
-        let codex_skill_root = agents_dir.join("skills").join(SKILL_DIR_NAME);
-        let codex_binary = codex_skill_root
-            .join("bin")
-            .join(platform)
-            .join(binary_name());
-
-        let agy_plugin_root = agy_config_dir.join("plugins").join(PLUGIN_DIR_NAME);
-        let agy_binary = agy_plugin_root
-            .join("bin")
-            .join(platform)
-            .join(binary_name());
-
-        let grok_hooks_file = hooks::hook_file_path(WorkerKind::Grok)?;
-        let codex_hooks_file = hooks::hook_file_path(WorkerKind::Codex)?;
-        let legacy_grok_hooks_file = grok_hooks_file
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("grok-bridge.json");
-
-        Ok(Self {
-            codex_skill_root,
-            codex_binary,
-            agy_plugin_root,
-            agy_binary,
-            grok_hooks_file,
-            codex_hooks_file,
-            legacy_grok_hooks_file,
-        })
     }
 }
 
@@ -186,24 +121,24 @@ pub fn apply_from(source: &Path, paths: &Paths, target: InstallTarget) -> Result
     let mut codex_hooks = None;
 
     if matches!(target, InstallTarget::All | InstallTarget::Codex) {
-        fs::create_dir_all(paths.codex_skill_root.parent().unwrap()).with_context(|| {
-            format!(
-                "创建 Codex skills 目录失败：{}",
-                paths.codex_skill_root.parent().unwrap().display()
-            )
-        })?;
+        let parent = paths
+            .codex_skill_root
+            .parent()
+            .ok_or_else(|| anyhow!("安装路径没有父目录：{}", paths.codex_skill_root.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("创建 Codex skills 目录失败：{}", parent.display()))?;
         copy_executable(source, &paths.codex_binary)?;
         extract_codex_skill_files(&paths.codex_skill_root)?;
         codex_binary = Some(paths.codex_binary.clone());
     }
 
     if matches!(target, InstallTarget::All | InstallTarget::Agy) {
-        fs::create_dir_all(paths.agy_plugin_root.parent().unwrap()).with_context(|| {
-            format!(
-                "创建 AGY plugins 目录失败：{}",
-                paths.agy_plugin_root.parent().unwrap().display()
-            )
-        })?;
+        let parent = paths
+            .agy_plugin_root
+            .parent()
+            .ok_or_else(|| anyhow!("安装路径没有父目录：{}", paths.agy_plugin_root.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("创建 AGY plugins 目录失败：{}", parent.display()))?;
         copy_executable(source, &paths.agy_binary)?;
         extract_agy_plugin_files(&paths.agy_plugin_root)?;
         agy_binary = Some(paths.agy_binary.clone());
@@ -338,284 +273,4 @@ pub fn uninstall_from(paths: &Paths, target: InstallTarget) -> Result<bool> {
         }
     }
     Ok(changed)
-}
-
-fn copy_executable(source: &Path, destination: &Path) -> Result<()> {
-    if source.canonicalize().ok().as_ref() == destination.canonicalize().ok().as_ref()
-        && destination.exists()
-    {
-        return Ok(());
-    }
-
-    let parent = destination
-        .parent()
-        .ok_or_else(|| anyhow!("安装路径没有父目录：{}", destination.display()))?;
-    fs::create_dir_all(parent)?;
-
-    let mut source_file = fs::File::open(source)
-        .with_context(|| format!("打开当前 EXE 失败：{}", source.display()))?;
-    let mut temporary = NamedTempFile::new_in(parent)
-        .with_context(|| format!("在 {} 创建临时文件失败", parent.display()))?;
-    std::io::copy(&mut source_file, temporary.as_file_mut())
-        .with_context(|| format!("复制 EXE 到 {} 失败", destination.display()))?;
-    temporary.as_file_mut().flush()?;
-    temporary.as_file().sync_all()?;
-    make_executable(temporary.path())?;
-    temporary
-        .persist(destination)
-        .map_err(|error| error.error)
-        .with_context(|| format!("替换 EXE 失败：{}", destination.display()))?;
-    Ok(())
-}
-
-fn extract_codex_skill_files(skill_root: &Path) -> Result<()> {
-    fs::create_dir_all(skill_root)?;
-    fs::create_dir_all(skill_root.join("agents"))?;
-    fs::create_dir_all(skill_root.join("hooks/unix"))?;
-    fs::create_dir_all(skill_root.join("hooks/windows"))?;
-
-    fs::write(skill_root.join("SKILL.md"), SKILL_MD)?;
-    fs::write(skill_root.join("README.md"), README_MD)?;
-    fs::write(skill_root.join("README-CN.md"), README_CN_MD)?;
-    fs::write(skill_root.join("agents/openai.yaml"), AGENTS_OPENAI_YAML)?;
-    fs::write(
-        skill_root.join("hooks/unix/agent-bridge-grok.json"),
-        HOOK_UNIX_GROK,
-    )?;
-    fs::write(
-        skill_root.join("hooks/windows/agent-bridge-grok.json"),
-        HOOK_WINDOWS_GROK,
-    )?;
-    fs::write(
-        skill_root.join("hooks/unix/agent-bridge-codex.json"),
-        HOOK_UNIX_CODEX,
-    )?;
-    fs::write(
-        skill_root.join("hooks/windows/agent-bridge-codex.json"),
-        HOOK_WINDOWS_CODEX,
-    )?;
-
-    Ok(())
-}
-
-fn extract_agy_plugin_files(plugin_root: &Path) -> Result<()> {
-    fs::create_dir_all(plugin_root)?;
-    fs::create_dir_all(plugin_root.join("skills/codex-worker"))?;
-    fs::create_dir_all(plugin_root.join("skills/grok-worker"))?;
-    fs::create_dir_all(plugin_root.join("hooks/unix"))?;
-    fs::create_dir_all(plugin_root.join("hooks/windows"))?;
-
-    fs::write(plugin_root.join("plugin.json"), PLUGIN_JSON)?;
-    fs::write(plugin_root.join("README.md"), README_MD)?;
-    fs::write(plugin_root.join("README-CN.md"), README_CN_MD)?;
-    fs::write(
-        plugin_root.join("skills/codex-worker/SKILL.md"),
-        CODEX_WORKER_SKILL_MD,
-    )?;
-    fs::write(
-        plugin_root.join("skills/grok-worker/SKILL.md"),
-        GROK_WORKER_SKILL_MD,
-    )?;
-    fs::write(
-        plugin_root.join("hooks/unix/agent-bridge-grok.json"),
-        HOOK_UNIX_GROK,
-    )?;
-    fs::write(
-        plugin_root.join("hooks/windows/agent-bridge-grok.json"),
-        HOOK_WINDOWS_GROK,
-    )?;
-    fs::write(
-        plugin_root.join("hooks/unix/agent-bridge-codex.json"),
-        HOOK_UNIX_CODEX,
-    )?;
-    fs::write(
-        plugin_root.join("hooks/windows/agent-bridge-codex.json"),
-        HOOK_WINDOWS_CODEX,
-    )?;
-
-    Ok(())
-}
-
-#[cfg(unix)]
-fn make_executable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-fn same_file_contents(left: &Path, right: &Path) -> Result<bool> {
-    if let (Ok(left_path), Ok(right_path)) = (left.canonicalize(), right.canonicalize())
-        && left_path == right_path
-    {
-        return Ok(true);
-    }
-    if fs::metadata(left)?.len() != fs::metadata(right)?.len() {
-        return Ok(false);
-    }
-
-    let mut left = BufReader::new(fs::File::open(left)?);
-    let mut right = BufReader::new(fs::File::open(right)?);
-    let mut left_buffer = [0_u8; 64 * 1024];
-    let mut right_buffer = [0_u8; 64 * 1024];
-    loop {
-        let left_read = left.read(&mut left_buffer)?;
-        let right_read = right.read(&mut right_buffer)?;
-        if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
-            return Ok(false);
-        }
-        if left_read == 0 {
-            return Ok(true);
-        }
-    }
-}
-
-fn current_platform_dir() -> &'static str {
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    return "windows-x86_64";
-    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-    return "windows-arm64";
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    return "linux-x86_64";
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    return "linux-arm64";
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    return "macos-x86_64";
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    return "macos-arm64";
-}
-
-fn binary_name() -> &'static str {
-    if cfg!(windows) {
-        "agent-bridge.exe"
-    } else {
-        "agent-bridge"
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_paths(root: &Path) -> Paths {
-        let platform = current_platform_dir();
-        let codex_skill_root = root.join(".agents/skills/agent-bridge");
-        let agy_plugin_root = root.join(".gemini/config/plugins/agent-bridge");
-        Paths {
-            codex_binary: codex_skill_root
-                .join("bin")
-                .join(platform)
-                .join(binary_name()),
-            codex_skill_root,
-            agy_binary: agy_plugin_root
-                .join("bin")
-                .join(platform)
-                .join(binary_name()),
-            agy_plugin_root,
-            grok_hooks_file: root.join(".grok/hooks/agent-bridge.json"),
-            codex_hooks_file: root.join(".codex/hooks.json"),
-            legacy_grok_hooks_file: root.join(".grok/hooks/grok-bridge.json"),
-        }
-    }
-
-    #[test]
-    fn installs_codex_skill_agy_plugin_and_dual_hooks_idempotently() {
-        let directory = tempfile::tempdir().unwrap();
-        let paths = test_paths(directory.path());
-
-        // Pre-seed user's foreign Codex hook and a legacy grok-bridge.json
-        fs::create_dir_all(paths.codex_hooks_file.parent().unwrap()).unwrap();
-        fs::write(
-            &paths.codex_hooks_file,
-            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook codex"}]}]}}"#,
-        )
-        .unwrap();
-        fs::create_dir_all(paths.legacy_grok_hooks_file.parent().unwrap()).unwrap();
-        fs::write(&paths.legacy_grok_hooks_file, b"{}").unwrap();
-
-        let source = directory.path().join("source.exe");
-        fs::write(&source, b"native-binary").unwrap();
-
-        let applied = apply_from(&source, &paths, InstallTarget::All).unwrap();
-        assert_eq!(applied.codex_binary.as_ref(), Some(&paths.codex_binary));
-        assert_eq!(applied.agy_binary.as_ref(), Some(&paths.agy_binary));
-        assert_eq!(
-            applied.legacy_grok_bridge_reminder.as_ref(),
-            Some(&paths.legacy_grok_hooks_file)
-        );
-        // Legacy file must NOT be auto-deleted.
-        assert!(paths.legacy_grok_hooks_file.exists());
-
-        assert_eq!(fs::read(&paths.codex_binary).unwrap(), b"native-binary");
-        assert_eq!(fs::read(&paths.agy_binary).unwrap(), b"native-binary");
-        assert!(paths.codex_skill_root.join("SKILL.md").is_file());
-        assert!(paths.codex_skill_root.join("agents/openai.yaml").is_file());
-        assert!(paths.agy_plugin_root.join("plugin.json").is_file());
-        assert!(
-            paths
-                .agy_plugin_root
-                .join("skills/codex-worker/SKILL.md")
-                .is_file()
-        );
-        assert!(
-            paths
-                .agy_plugin_root
-                .join("skills/grok-worker/SKILL.md")
-                .is_file()
-        );
-
-        let status_result = status(&paths).unwrap();
-        assert!(status_result.binary_installed);
-        assert!(status_result.codex_skill_installed);
-        assert!(status_result.agy_plugin_installed);
-        assert!(status_result.grok_hooks_configured);
-        assert!(status_result.codex_hooks_configured);
-        assert!(status_result.legacy_grok_bridge_path.is_some());
-
-        // Foreign rtk hook must remain intact.
-        let codex_hooks_content = fs::read_to_string(&paths.codex_hooks_file).unwrap();
-        assert!(codex_hooks_content.contains("rtk hook codex"));
-
-        // Second apply is idempotent.
-        let first_codex_hooks = fs::read(&paths.codex_hooks_file).unwrap();
-        let first_grok_hooks = fs::read(&paths.grok_hooks_file).unwrap();
-        apply_from(&source, &paths, InstallTarget::All).unwrap();
-        assert_eq!(
-            fs::read(&paths.codex_hooks_file).unwrap(),
-            first_codex_hooks
-        );
-        assert_eq!(fs::read(&paths.grok_hooks_file).unwrap(), first_grok_hooks);
-
-        // Uninstall removes only managed hooks and leaves rtk hook intact.
-        assert!(uninstall_from(&paths, InstallTarget::All).unwrap());
-        let after = fs::read_to_string(&paths.codex_hooks_file).unwrap();
-        assert!(after.contains("rtk hook codex"));
-    }
-
-    #[test]
-    fn byte_compare_detects_updates() {
-        let directory = tempfile::tempdir().unwrap();
-        let paths = test_paths(directory.path());
-
-        let source_v1 = directory.path().join("v1.exe");
-        let source_v2 = directory.path().join("v2.exe");
-        fs::write(&source_v1, b"version-1").unwrap();
-        fs::write(&source_v2, b"version-2-different").unwrap();
-
-        apply_from(&source_v1, &paths, InstallTarget::All).unwrap();
-        assert!(!same_file_contents(&source_v2, &paths.codex_binary).unwrap());
-
-        apply_from(&source_v2, &paths, InstallTarget::All).unwrap();
-        assert_eq!(
-            fs::read(&paths.codex_binary).unwrap(),
-            b"version-2-different"
-        );
-        assert_eq!(fs::read(&paths.agy_binary).unwrap(), b"version-2-different");
-    }
 }
