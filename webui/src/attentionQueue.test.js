@@ -102,6 +102,37 @@ describe("orderGroups", () => {
     s = sync(s, gs({ ...a, created_at_ms: 900 }, b));
     expect(order(s, gs({ ...a, created_at_ms: 900 }, b))).toEqual(["a", "b"]);
   });
+
+  test("regression #60: concurrent attention groups stay pinned despite alternating last_output_at_ms", () => {
+    const g = (t1, t2) => [
+      ["a", [working({ created_at_ms: 100, last_output_at_ms: t1 })]],
+      ["b", [working({ created_at_ms: 200, last_output_at_ms: t2 })]],
+    ];
+    let s = sync(initial(), g(100, 200));
+    expect(order(s, g(100, 200))).toEqual(["b", "a"]);
+
+    // Alternating streaming output timestamps must never cause group reordering.
+    s = sync(s, g(900, 200));
+    expect(order(s, g(900, 200))).toEqual(["b", "a"]);
+    s = sync(s, g(900, 1200));
+    expect(order(s, g(900, 1200))).toEqual(["b", "a"]);
+    s = sync(s, g(5000, 1200));
+    expect(order(s, g(5000, 1200))).toEqual(["b", "a"]);
+  });
+
+  test("regression #60: syncGroups preserves exact state reference when metadata/folds are unchanged", () => {
+    const groups1 = [
+      ["a", [working({ session: "s1", last_output_at_ms: 100 })]],
+      ["b", [done({ session: "s2", last_output_at_ms: 50 })]],
+    ];
+    const s1 = sync(initial(), groups1);
+    const groups2 = [
+      ["a", [working({ session: "s1", last_output_at_ms: 999, updated_at_ms: 999 })]],
+      ["b", [done({ session: "s2", last_output_at_ms: 50, updated_at_ms: 999 })]],
+    ];
+    const s2 = sync(s1, groups2);
+    expect(s2).toBe(s1);
+  });
 });
 
 describe("auto-fold", () => {

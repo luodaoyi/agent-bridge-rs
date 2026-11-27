@@ -5,41 +5,59 @@ impl SessionHost {
         self.list()
     }
 
+    fn list_web_lightweight(&self) -> Result<Vec<(Arc<Session>, SessionState)>> {
+        let registry = self
+            .registry
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?;
+        let mut items = registry
+            .sessions
+            .values()
+            .map(|session| Ok((Arc::clone(session), session.state_without_screen()?)))
+            .collect::<Result<Vec<_>>>()?;
+        items.sort_by_key(|(_, state)| state.created_at_ms);
+        Ok(items)
+    }
+
     /// Plan ordered WebUI events frames without mutating the connection cursor map.
     ///
     /// - `force_reset`: one `reset=true` ANSI snapshot per session (upgrade / resync).
     /// - Otherwise drain raw PTY bytes only up to each session's **frozen**
     ///   `last_cursor` from this batch so a live producer cannot make the plan chase
     ///   forever.
+    /// - Lightweight metadata queries skip heavy `screen` / `screen_ansi_base64`
+    ///   formatting; full ANSI screen snapshots are fetched lazily only for sessions
+    ///   requiring a reset.
     /// - Terminal entries may span multiple frames under `max_message_bytes`.
     /// - Cursor commits/drops are returned per frame and must be applied only after
     ///   that frame is successfully sent.
-    /// - Session metadata in the JSON omits heavy `screen` / `screen_ansi_base64`;
-    ///   reset terminal entries remain the authoritative ANSI snapshot.
     pub(crate) fn plan_web_events(
         &self,
         cursors: &HashMap<String, u64>,
         force_reset: bool,
         max_message_bytes: usize,
     ) -> Result<Vec<WebEventsFramePlan>> {
-        let sessions = self.list_web()?;
-        let active: HashSet<&str> = sessions
+        let mut items = self.list_web_lightweight()?;
+        let active: HashSet<String> = items
             .iter()
-            .map(|state| state.session.as_str())
+            .map(|(_, state)| state.session.clone())
             .collect();
         let cursor_drops: Vec<String> = cursors
             .keys()
-            .filter(|session| !active.contains(session.as_str()))
+            .filter(|session| !active.contains(*session))
             .cloned()
             .collect();
 
         let mut terminal_entries: Vec<(TerminalStreamEntry, Option<(String, u64)>)> = Vec::new();
-        for state in &sessions {
+        for (session, state) in &mut items {
             if force_reset || !cursors.contains_key(&state.session) {
-                terminal_entries.push((
-                    TerminalStreamEntry::reset_snapshot(state),
-                    Some((state.session.clone(), state.last_cursor)),
-                ));
+                let mut full = session.state()?;
+                let entry = TerminalStreamEntry::reset_snapshot(&full);
+                let commit = Some((full.session.clone(), full.last_cursor));
+                full.screen = None;
+                full.screen_ansi_base64 = String::new();
+                *state = full;
+                terminal_entries.push((entry, commit));
                 continue;
             }
 
@@ -51,10 +69,13 @@ impl SessionHost {
             // unbounded-chase the live cursor inside one plan call.
             let freeze_end = state.last_cursor;
             if cursor > freeze_end {
-                terminal_entries.push((
-                    TerminalStreamEntry::reset_snapshot(state),
-                    Some((state.session.clone(), freeze_end)),
-                ));
+                let mut full = session.state()?;
+                let entry = TerminalStreamEntry::reset_snapshot(&full);
+                let commit = Some((full.session.clone(), full.last_cursor));
+                full.screen = None;
+                full.screen_ansi_base64 = String::new();
+                *state = full;
+                terminal_entries.push((entry, commit));
                 continue;
             }
             if cursor == freeze_end {
@@ -65,21 +86,27 @@ impl SessionHost {
                 let limit = usize::try_from(freeze_end - cursor)
                     .unwrap_or(MAX_READ_BYTES)
                     .clamp(1, MAX_READ_BYTES);
-                let read = match self.read(&state.session, cursor, limit, 0) {
+                let read = match session.read(cursor, limit, 0) {
                     Ok(read) => read,
                     Err(_) => {
-                        terminal_entries.push((
-                            TerminalStreamEntry::reset_snapshot(state),
-                            Some((state.session.clone(), freeze_end)),
-                        ));
+                        let mut full = session.state()?;
+                        let entry = TerminalStreamEntry::reset_snapshot(&full);
+                        let commit = Some((full.session.clone(), full.last_cursor));
+                        full.screen = None;
+                        full.screen_ansi_base64 = String::new();
+                        *state = full;
+                        terminal_entries.push((entry, commit));
                         break;
                     }
                 };
                 if read.truncated {
-                    terminal_entries.push((
-                        TerminalStreamEntry::reset_snapshot(state),
-                        Some((state.session.clone(), freeze_end)),
-                    ));
+                    let mut full = session.state()?;
+                    let entry = TerminalStreamEntry::reset_snapshot(&full);
+                    let commit = Some((full.session.clone(), full.last_cursor));
+                    full.screen = None;
+                    full.screen_ansi_base64 = String::new();
+                    *state = full;
+                    terminal_entries.push((entry, commit));
                     break;
                 }
                 if read.next_cursor == read.cursor {
@@ -104,8 +131,7 @@ impl SessionHost {
             }
         }
 
-        let sessions_view: Vec<SessionState> =
-            sessions.into_iter().map(web_events_session_view).collect();
+        let sessions_view: Vec<SessionState> = items.into_iter().map(|(_, state)| state).collect();
         pack_web_events_frames(
             sessions_view,
             terminal_entries,

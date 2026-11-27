@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Bot, ChevronRight, CircleStop } from "lucide-react";
 import { useI18n } from "../i18n/index.js";
 import { useNow } from "../hooks/useNow.js";
@@ -13,6 +14,28 @@ import { MetaField } from "./MetaField.jsx";
 import { SessionLifecycleHint } from "./SessionLifecycleHint.jsx";
 import { ActivityBadge, LifecycleBadge } from "./StatusBadge.jsx";
 import { Terminal } from "./Terminal.jsx";
+
+function relativeAgeDelayMs(updatedAtMs, now) {
+  const ageMs = Math.max(0, now - updatedAtMs);
+  if (ageMs < 60_000) return 5_000;
+  if (ageMs < 3_600_000) return 60_000 - (ageMs % 60_000) + 50;
+  return 3_600_000 - (ageMs % 3_600_000) + 50;
+}
+
+function RelativeAge({ updatedAtMs, locale }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const current = Date.now();
+    const id = window.setTimeout(
+      () => setNow(Date.now()),
+      relativeAgeDelayMs(updatedAtMs, current),
+    );
+    return () => window.clearTimeout(id);
+  }, [updatedAtMs, now]);
+
+  return ageLabel(updatedAtMs, now, locale);
+}
 
 function workerDisplay(worker) {
   if (worker === "codex") return "Codex";
@@ -119,7 +142,7 @@ export function SubagentCard({
             })}
           </MetaField>
           <MetaField label={t("session.meta.updated")}>
-            {ageLabel(session.updated_at_ms, Date.now(), locale)}
+            <RelativeAge updatedAtMs={session.updated_at_ms} locale={locale} />
           </MetaField>
           <MetaField label={t("session.meta.client")}>
             {clientStateLabel(session.client_state, t)}

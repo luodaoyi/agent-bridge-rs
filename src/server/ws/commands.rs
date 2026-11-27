@@ -190,11 +190,6 @@ pub(in crate::server) fn apply_web_events_client_command(
     host: &SessionHost,
     command: &WebEventsClientCommand,
 ) -> Result<(), String> {
-    // An inbound command proves the WebUI is attached right now. Refresh before
-    // touching the PTY so a provisional orphan claim is canceled before input
-    // or resize is accepted.
-    host.touch_web_clients()
-        .map_err(|error| format!("{error:#}"))?;
     match command {
         WebEventsClientCommand::TerminalInput {
             session,
@@ -202,6 +197,11 @@ pub(in crate::server) fn apply_web_events_client_command(
             ..
         } => {
             let data = decode_write_data(data_base64).map_err(|error| format!("{error:#}"))?;
+            // Explicit keyboard input proves interactive human presence: refresh
+            // client leases before touching the PTY so a provisional orphan claim
+            // is canceled right before input delivery.
+            host.touch_web_clients()
+                .map_err(|error| format!("{error:#}"))?;
             host.write_raw(session, data)
                 .map(|_| ())
                 .map_err(|error| format!("{error:#}"))
@@ -212,6 +212,9 @@ pub(in crate::server) fn apply_web_events_client_command(
             rows,
             ..
         } => {
+            // Read-only viewport sync must never refresh client leases: connecting
+            // or switching tabs in WebUI automatically emits `terminal_resize` and
+            // would otherwise falsely mark expired supervisors as online.
             validate_terminal_size(*cols, *rows).map_err(|error| format!("{error:#}"))?;
             host.resize(session, *cols, *rows)
                 .map(|_| ())

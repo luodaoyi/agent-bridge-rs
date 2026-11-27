@@ -47,6 +47,16 @@ function peak(sessions, withUpdated) {
 const semantic = (sessions) => peak(sessions, false);
 const snapshot = (sessions) => peak(sessions, true);
 
+// Sort key for ATTENTION groups after cycle entry: tracks genuine lifecycle
+// changes (session creation / hook updates) while ignoring high-frequency PTY
+// streaming `last_output_at_ms` churn.
+function stableAttentionTime(sessions) {
+  return sessions.reduce(
+    (max, s) => Math.max(max, ms(s.created_at_ms), ms(s.hook_at_ms)),
+    0,
+  );
+}
+
 function childSetId(sessions) {
   return sessions.map((s) => s.session).sort().join("\u0000");
 }
@@ -57,7 +67,7 @@ function isRealSupervisor(sessions) {
 
 export function createInitialAttentionQueueState() {
   return {
-    groups: {}, // key -> { childIds, class, completedAtMs }
+    groups: {}, // key -> { childIds, class, completedAtMs, enteredAttentionAtMs }
     collapsed: new Set(),
     manualOpen: new Set(),
     manualClosed: new Set(),
@@ -118,11 +128,23 @@ function syncGroups(state, groups) {
     }
     let completedAtMs =
       klass === GROUP_CLASS.CLEAN_DONE ? prev?.completedAtMs ?? null : null;
+    let enteredAttentionAtMs =
+      klass === GROUP_CLASS.ATTENTION
+        ? prev?.enteredAttentionAtMs ?? null
+        : null;
     if (klass === GROUP_CLASS.CLEAN_DONE && newCycle) {
       completedAtMs = snapshot(sessions); // pinned for the whole cycle
       if (focusedKey === key) deferred.add(key);
     }
-    nextGroups[key] = { childIds, class: klass, completedAtMs };
+    if (klass === GROUP_CLASS.ATTENTION && newCycle) {
+      enteredAttentionAtMs = semantic(sessions) || snapshot(sessions);
+    }
+    nextGroups[key] = {
+      childIds,
+      class: klass,
+      completedAtMs,
+      enteredAttentionAtMs,
+    };
   }
 
   // Removed groups drop their fold and manual state.
@@ -167,6 +189,21 @@ function syncGroups(state, groups) {
     }
   }
 
+  const hadGroups = groups.length > 0;
+  if (
+    !structureChanged &&
+    state.focusedKey === focusedKey &&
+    state.hadAttention === hasAttention &&
+    state.hadGroups === hadGroups &&
+    setsEqual(state.collapsed, collapsed) &&
+    setsEqual(state.manualOpen, manualOpen) &&
+    setsEqual(state.manualClosed, manualClosed) &&
+    setsEqual(state.deferred, deferred) &&
+    groupsRecordEqual(state.groups, nextGroups)
+  ) {
+    return state;
+  }
+
   return {
     groups: nextGroups,
     collapsed,
@@ -175,8 +212,37 @@ function syncGroups(state, groups) {
     deferred,
     focusedKey,
     hadAttention: hasAttention,
-    hadGroups: groups.length > 0,
+    hadGroups,
   };
+}
+
+function setsEqual(a, b) {
+  if (a === b) return true;
+  if (a.size !== b.size) return false;
+  for (const item of a) {
+    if (!b.has(item)) return false;
+  }
+  return true;
+}
+
+function groupsRecordEqual(a, b) {
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const key of keysA) {
+    const entryA = a[key];
+    const entryB = b[key];
+    if (
+      !entryB ||
+      entryA.childIds !== entryB.childIds ||
+      entryA.class !== entryB.class ||
+      entryA.completedAtMs !== entryB.completedAtMs ||
+      entryA.enteredAttentionAtMs !== entryB.enteredAttentionAtMs
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function mostRecent(keys, groups) {
@@ -234,7 +300,12 @@ export function orderGroups(groups, state) {
           ? mem
             ? Math.max(mem.completedAtMs ?? 0, semantic(sessions))
             : snapshot(sessions)
-          : semantic(sessions);
+          : mem
+            ? Math.max(
+                mem.enteredAttentionAtMs ?? 0,
+                stableAttentionTime(sessions),
+              )
+            : semantic(sessions);
       return { key, sessions, class: klass, time };
     })
     .sort(compareGroups)

@@ -843,6 +843,39 @@ describe("App", () => {
       expect(groupKeys()).toEqual(["client:client-a", "client:client-b"]);
     });
 
+    it("preserves group order and DOM focus across alternating output bursts", async () => {
+      const ws = await renderAppAndConnect([
+        sessionOf("a", 100, { created_at_ms: 100, last_output_at_ms: 100 }),
+        sessionOf("b", 100, { created_at_ms: 200, last_output_at_ms: 200 }),
+      ]);
+      expect(groupKeys()).toEqual(["client:client-b", "client:client-a"]);
+      const secondGroupNode = group("client:client-a");
+      const resizeHandle = secondGroupNode.querySelector("[data-terminal-resize]");
+      await act(async () => {
+        resizeHandle.focus();
+      });
+      expect(document.activeElement).toBe(resizeHandle);
+
+      const bursts = [
+        [900, 200],
+        [900, 1500],
+        [3000, 1500],
+        [3000, 5000],
+      ];
+      for (const [outA, outB] of bursts) {
+        await act(async () =>
+          pushSessions(ws, [
+            sessionOf("a", 100, { created_at_ms: 100, last_output_at_ms: outA }),
+            sessionOf("b", 100, { created_at_ms: 200, last_output_at_ms: outB }),
+          ]),
+        );
+        await settle();
+        expect(groupKeys()).toEqual(["client:client-b", "client:client-a"]);
+        expect(group("client:client-a")).toBe(secondGroupNode);
+        expect(document.activeElement).toBe(resizeHandle);
+      }
+    });
+
     it("manual open survives noise but a new cycle restores auto-fold", async () => {
       const ws = await renderAppAndConnect([sessionOf("a"), doneSession({
         session: "gbt-d",

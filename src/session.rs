@@ -17,7 +17,7 @@ pub(crate) use web_events::WebEventsFramePlan;
 use io::{spawn_reader, spawn_waiter, spawn_writer};
 use process::*;
 use state::*;
-use web_events::{pack_web_events_frames, web_events_session_view};
+use web_events::pack_web_events_frames;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},

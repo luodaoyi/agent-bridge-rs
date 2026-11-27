@@ -327,6 +327,26 @@ pub(crate) fn with_test_host_holding_close_lock<R>(
     run(host)
 }
 
+pub(crate) fn test_host_with_expired_client_lease() -> (SessionHost, Arc<AtomicU64>) {
+    let (host, session) = test_host_with_session(TEST_PROVIDER_SESSION_ID, SessionPhase::Running);
+    let lease = Arc::new(AtomicU64::new(1_000));
+    {
+        let mut inner = session.inner.lock().unwrap();
+        inner.client_session_id = Some("codex-web".to_owned());
+        inner.client_lease = Some(Arc::clone(&lease));
+        inner.orphan_policy = OrphanPolicy {
+            lease_ms: 100,
+            grace_ms: 200,
+        };
+    }
+    host.registry
+        .lock()
+        .unwrap()
+        .clients
+        .insert("codex-web".to_owned(), Arc::clone(&lease));
+    (host, lease)
+}
+
 pub(crate) fn test_host_with_poisoned_close_lock(
     provider_session_id: &str,
     phase: SessionPhase,
@@ -3102,4 +3122,34 @@ fn tombstone_eviction_keeps_recent_handles() {
     assert!(registry.was_closed("recent"));
     assert!(registry.was_closed("newest"));
     assert!(!registry.was_closed("old-0"));
+}
+
+#[test]
+fn state_without_screen_omits_screen_while_preserving_metadata() {
+    let host = test_host(TEST_PROVIDER_SESSION_ID, SessionPhase::Running);
+    let session = host.get("gbt-test").unwrap();
+    session.append_output(b"hello world".to_vec());
+
+    let full = session.state().unwrap();
+    let light = session.state_without_screen().unwrap();
+    assert!(full.screen.is_some());
+    assert!(!full.screen_ansi_base64.is_empty());
+    assert!(light.screen.is_none());
+    assert!(light.screen_ansi_base64.is_empty());
+    assert_eq!(light.session, full.session);
+    assert_eq!(light.rows, full.rows);
+    assert_eq!(light.cols, full.cols);
+    assert_eq!(light.last_cursor, full.last_cursor);
+    assert_eq!(light.phase, full.phase);
+    assert_eq!(light.cwd, full.cwd);
+
+    // Incremental plan_web_events emits deltas without full screen snapshots.
+    let cursors = HashMap::from([("gbt-test".to_owned(), 0_u64)]);
+    let frames = host.plan_web_events(&cursors, false, 1024 * 1024).unwrap();
+    assert_eq!(frames.len(), 1);
+    assert!(!frames[0].message.terminals[0].reset);
+    assert_eq!(
+        frames[0].cursor_commits.get("gbt-test").copied(),
+        Some(full.last_cursor)
+    );
 }

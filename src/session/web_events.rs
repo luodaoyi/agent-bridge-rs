@@ -11,18 +11,34 @@ pub(crate) struct WebEventsFramePlan {
     pub(crate) cursor_drops: Vec<String>,
 }
 
-/// Strip heavy terminal snapshots from session metadata for `/api/events`.
-/// Reset terminal entries carry the authoritative ANSI snapshot.
-pub(super) fn web_events_session_view(mut state: SessionState) -> SessionState {
-    state.screen = None;
-    state.screen_ansi_base64 = String::new();
-    state
+fn json_len<T: serde::Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(usize::MAX)
 }
 
 fn message_json_len(message: &WebEventsMessage) -> usize {
-    serde_json::to_vec(message)
-        .map(|bytes| bytes.len())
-        .unwrap_or(usize::MAX)
+    json_len(message)
+}
+
+/// Exact serialized byte length when adding terminal entries onto the base
+/// `sessions_only` envelope (whose `terminals` array serialized as `[]`).
+/// Avoids cloning `sessions_view` during size probes.
+fn encoded_message_len_with_base(
+    sessions_only_len: usize,
+    entries: &[TerminalStreamEntry],
+) -> usize {
+    if entries.is_empty() {
+        return sessions_only_len;
+    }
+    let Some(entries_len) = serde_json::to_vec(entries).ok().map(|bytes| bytes.len()) else {
+        return usize::MAX;
+    };
+    // `"terminals":[]` in sessions_only contributes `2` bytes for `[]`; replacing
+    // it with `[...entries]` changes total length by `entries_len - 2`.
+    sessions_only_len
+        .saturating_sub(2)
+        .saturating_add(entries_len)
 }
 
 /// One planned terminal payload plus an optional durable cursor commit for its
@@ -51,7 +67,7 @@ pub(super) fn pack_web_events_frames(
         expanded.extend(split_terminal_entry_to_fit(
             entry,
             commit,
-            &sessions_view,
+            sessions_only_len,
             max_message_bytes,
         )?);
     }
@@ -88,21 +104,25 @@ pub(super) fn pack_web_events_frames(
     }
 
     for (entry, commit) in expanded {
-        let mut probe_terminals = terminals.clone();
-        probe_terminals.push(entry.clone());
-        let probe = WebEventsMessage::sessions(sessions_view.clone(), probe_terminals);
-        if !terminals.is_empty() && message_json_len(&probe) > max_message_bytes {
-            flush(
-                &mut terminals,
-                &mut commits,
-                &mut drops_for_first,
-                &sessions_view,
-                &mut frames,
-            );
+        if !terminals.is_empty() {
+            let mut probe_terminals = terminals.clone();
+            probe_terminals.push(entry.clone());
+            if encoded_message_len_with_base(sessions_only_len, &probe_terminals)
+                > max_message_bytes
+            {
+                flush(
+                    &mut terminals,
+                    &mut commits,
+                    &mut drops_for_first,
+                    &sessions_view,
+                    &mut frames,
+                );
+            }
         }
         // After split_terminal_entry_to_fit, a single entry must fit alone.
-        let alone = WebEventsMessage::sessions(sessions_view.clone(), vec![entry.clone()]);
-        if message_json_len(&alone) > max_message_bytes {
+        if encoded_message_len_with_base(sessions_only_len, std::slice::from_ref(&entry))
+            > max_message_bytes
+        {
             bail!("web events terminal chunk still exceeds max_message_bytes after split");
         }
         terminals.push(entry);
@@ -141,14 +161,8 @@ pub(super) fn pack_web_events_frames(
     Ok(frames)
 }
 
-fn terminal_entry_message_len(
-    sessions_view: &[SessionState],
-    entry: &TerminalStreamEntry,
-) -> usize {
-    message_json_len(&WebEventsMessage::sessions(
-        sessions_view.to_vec(),
-        vec![entry.clone()],
-    ))
+fn terminal_entry_message_len(sessions_only_len: usize, entry: &TerminalStreamEntry) -> usize {
+    encoded_message_len_with_base(sessions_only_len, std::slice::from_ref(entry))
 }
 
 /// Split one terminal entry into ordered pieces that each serialize to
@@ -158,10 +172,10 @@ fn terminal_entry_message_len(
 fn split_terminal_entry_to_fit(
     entry: TerminalStreamEntry,
     commit: Option<(String, u64)>,
-    sessions_view: &[SessionState],
+    sessions_only_len: usize,
     max_message_bytes: usize,
 ) -> Result<Vec<PlannedTerminal>> {
-    if terminal_entry_message_len(sessions_view, &entry) <= max_message_bytes {
+    if terminal_entry_message_len(sessions_only_len, &entry) <= max_message_bytes {
         return Ok(vec![(entry, commit)]);
     }
 
@@ -193,7 +207,7 @@ fn split_terminal_entry_to_fit(
                 next_cursor: stream_cursor.saturating_add(mid as u64),
                 data_base64: BASE64.encode(&raw[offset..offset + mid]),
             };
-            if terminal_entry_message_len(sessions_view, &candidate) <= max_message_bytes {
+            if terminal_entry_message_len(sessions_only_len, &candidate) <= max_message_bytes {
                 best = mid;
                 lo = mid + 1;
             } else if mid == 0 {

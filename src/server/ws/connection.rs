@@ -3,7 +3,7 @@ use std::{
     io::ErrorKind,
     net::TcpStream,
     sync::atomic::Ordering,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -17,13 +17,23 @@ use super::{
     },
 };
 
+const WEB_EVENTS_COALESCE_WINDOW: Duration = Duration::from_millis(35);
+const WEB_EVENTS_COALESCE_STEP: Duration = Duration::from_millis(8);
+
 pub(super) fn run_events_websocket(websocket: &mut WebSocket<TcpStream>, state: &RuntimeState) {
     let mut cursors = HashMap::new();
     // Request ids must be unique within this connection; duplicates are
     // rejected before any PTY side effect.
     let mut seen_ids = HashSet::new();
+    let mut last_sent_sessions_json: Option<String> = None;
     let mut seen_revision = state.host.revision();
-    if !send_web_events(websocket, state, &mut cursors, true) {
+    if !send_web_events(
+        websocket,
+        state,
+        &mut cursors,
+        &mut last_sent_sessions_json,
+        true,
+    ) {
         return;
     }
 
@@ -45,7 +55,7 @@ pub(super) fn run_events_websocket(websocket: &mut WebSocket<TcpStream>, state: 
         // transition, but never longer than WEB_EVENTS_CLIENT_POLL so client
         // frames stay low-latency. Timeouts without a revision/lease signal
         // never push frames. The event stream itself never refreshes Codex
-        // leases (only inbound terminal commands do), so real lease
+        // leases (only explicit interactive input does), so real lease
         // transitions still arrive promptly for display.
         let wait = match lease_deadline {
             Some(deadline) if deadline > now => Duration::from_millis(deadline - now)
@@ -68,10 +78,35 @@ pub(super) fn run_events_websocket(websocket: &mut WebSocket<TcpStream>, state: 
         if current == seen_revision && !lease_due {
             continue;
         }
-        if current != seen_revision {
-            seen_revision = current;
+
+        // Batch rapid PTY/metadata bursts into one WebSocket frame while still
+        // polling inbound client commands at low latency.
+        let coalesce_until = Instant::now() + WEB_EVENTS_COALESCE_WINDOW;
+        loop {
+            let remaining = coalesce_until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || state.stopping.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(remaining.min(WEB_EVENTS_COALESCE_STEP));
+            match poll_websocket_client(websocket, state, &mut seen_ids) {
+                WsClientAction::Continue => {}
+                WsClientAction::Close => return,
+            }
         }
-        if !send_web_events(websocket, state, &mut cursors, false) {
+        if state.stopping.load(Ordering::Acquire) {
+            break;
+        }
+
+        // Sample the revision right before planning so updates folded into this
+        // coalesced snapshot do not re-trigger an immediate duplicate push.
+        seen_revision = state.host.revision();
+        if !send_web_events(
+            websocket,
+            state,
+            &mut cursors,
+            &mut last_sent_sessions_json,
+            false,
+        ) {
             return;
         }
     }
@@ -86,8 +121,12 @@ fn send_web_events(
     websocket: &mut WebSocket<TcpStream>,
     state: &RuntimeState,
     cursors: &mut HashMap<String, u64>,
+    last_sent_sessions_json: &mut Option<String>,
     force_reset: bool,
 ) -> bool {
+    if force_reset {
+        *last_sent_sessions_json = None;
+    }
     let frames =
         match state
             .host
@@ -99,6 +138,18 @@ fn send_web_events(
                 return true;
             }
         };
+
+    // Suppress empty no-op delta pushes when neither terminal bytes nor session
+    // metadata changed since the previous frame.
+    if !force_reset
+        && frames.len() == 1
+        && frames[0].message.terminals.is_empty()
+        && frames[0].cursor_drops.is_empty()
+        && let Ok(sessions_json) = serde_json::to_string(&frames[0].message.sessions)
+        && last_sent_sessions_json.as_deref() == Some(sessions_json.as_str())
+    {
+        return true;
+    }
 
     for frame in frames {
         let payload = match serde_json::to_string(&frame.message) {
@@ -122,6 +173,9 @@ fn send_web_events(
             .is_err()
         {
             return false;
+        }
+        if let Ok(sessions_json) = serde_json::to_string(&frame.message.sessions) {
+            *last_sent_sessions_json = Some(sessions_json);
         }
         for (session, cursor) in frame.cursor_commits {
             cursors.insert(session, cursor);

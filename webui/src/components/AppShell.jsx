@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { TerminalIOContext } from "../context/TerminalIOContext.jsx";
 import {
   attentionQueueReducer,
@@ -79,6 +79,31 @@ export function AppShell() {
     () => orderGroups(groups, queueState),
     [groups, queueState],
   );
+  const groupHandlersRef = useRef(new Map());
+  const dispatchQueueRef = useRef(dispatchQueue);
+  dispatchQueueRef.current = dispatchQueue;
+
+  const getGroupHandlers = (key) => {
+    let handlers = groupHandlersRef.current.get(key);
+    if (!handlers) {
+      handlers = {
+        onToggle: (open) =>
+          dispatchQueueRef.current({ type: "GROUP_TOGGLE", key, open }),
+        onFocus: () => dispatchQueueRef.current({ type: "GROUP_FOCUS", key }),
+        onBlur: () => dispatchQueueRef.current({ type: "GROUP_BLUR", key }),
+      };
+      groupHandlersRef.current.set(key, handlers);
+    }
+    return handlers;
+  };
+
+  useEffect(() => {
+    const activeKeys = new Set(groups.map(([key]) => key));
+    for (const key of groupHandlersRef.current.keys()) {
+      if (!activeKeys.has(key)) groupHandlersRef.current.delete(key);
+    }
+  }, [groups]);
+
   const stats = useMemo(() => sessionStats(sessions), [sessions]);
   const showEmpty =
     sessions.length === 0 &&
@@ -193,6 +218,7 @@ export function AppShell() {
                     const owner = ownerSessions[0]?.owner ?? null;
                     const clientSessionId =
                       ownerSessions[0]?.client_session_id ?? null;
+                    const handlers = getGroupHandlers(key);
                     return (
                       <SupervisorGroup
                         key={key}
@@ -202,15 +228,9 @@ export function AppShell() {
                         sessions={ownerSessions}
                         collapsed={queueState.collapsed.has(key)}
                         collapsedSessions={collapsedSessions}
-                        onToggle={(open) =>
-                          dispatchQueue({ type: "GROUP_TOGGLE", key, open })
-                        }
-                        onFocus={() =>
-                          dispatchQueue({ type: "GROUP_FOCUS", key })
-                        }
-                        onBlur={() =>
-                          dispatchQueue({ type: "GROUP_BLUR", key })
-                        }
+                        onToggle={handlers.onToggle}
+                        onFocus={handlers.onFocus}
+                        onBlur={handlers.onBlur}
                         onToggleSession={toggleSession}
                         onCloseGroup={closeGroup}
                         onCloseSession={closeSession}
