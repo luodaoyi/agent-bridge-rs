@@ -17,6 +17,10 @@ function emptyBytes() {
 export function createEmptySyncOutputFilter() {
   /** Number of leading bytes of `EMPTY_PAIR` currently matched cleanly. */
   let matched = 0;
+  /** Whether xterm is currently inside an active synchronized-output block. */
+  let inSync = false;
+  let emitStartMatch = 0;
+  let emitEndMatch = 0;
 
   return {
     filter(chunk) {
@@ -30,19 +34,48 @@ export function createEmptySyncOutputFilter() {
 
       const out = [];
 
+      const emitByte = (byte) => {
+        out.push(byte);
+        if (byte === SYNC_START[emitStartMatch]) {
+          emitStartMatch += 1;
+          if (emitStartMatch === SYNC_START.length) {
+            inSync = true;
+            emitStartMatch = 0;
+          }
+        } else {
+          emitStartMatch = byte === SYNC_START[0] ? 1 : 0;
+        }
+        if (byte === SYNC_END[emitEndMatch]) {
+          emitEndMatch += 1;
+          if (emitEndMatch === SYNC_END.length) {
+            inSync = false;
+            emitEndMatch = 0;
+          }
+        } else {
+          emitEndMatch = byte === SYNC_END[0] ? 1 : 0;
+        }
+      };
+
       const consumeByte = (byte) => {
         while (true) {
           if (byte === EMPTY_PAIR[matched]) {
             matched += 1;
             if (matched === EMPTY_PAIR.length) {
-              // Drop the complete empty `\x1b[?2026h\x1b[?2026l` pair.
               matched = 0;
+              if (inSync) {
+                // Xterm handles DEC 2026 as a boolean, not a nesting counter.
+                // Forward the closing SYNC_END so an active synchronized frame
+                // flushes immediately instead of waiting for the 1s failsafe.
+                for (let i = 0; i < SYNC_END.length; i += 1) {
+                  emitByte(SYNC_END[i]);
+                }
+              }
             }
             return;
           }
 
           if (matched === 0) {
-            out.push(byte);
+            emitByte(byte);
             return;
           }
 
@@ -50,7 +83,7 @@ export function createEmptySyncOutputFilter() {
             // Partial `\x1b[?2026h` prefix failed: flush buffered prefix and
             // restart cleanly (checking if this byte itself begins ESC).
             for (let i = 0; i < matched; i += 1) {
-              out.push(SYNC_START[i]);
+              emitByte(SYNC_START[i]);
             }
             matched = 0;
             continue;
@@ -63,7 +96,7 @@ export function createEmptySyncOutputFilter() {
           // + `byte` so back-to-back `\x1b[?2026h\x1b[?2026h\x1b[?2026l` or any
           // nested prefix still catches the trailing empty pair.
           for (let i = 0; i < SYNC_START.length; i += 1) {
-            out.push(SYNC_START[i]);
+            emitByte(SYNC_START[i]);
           }
           matched = 0;
           for (let i = 0; i < suffixMatched; i += 1) {
@@ -81,6 +114,9 @@ export function createEmptySyncOutputFilter() {
 
     reset() {
       matched = 0;
+      inSync = false;
+      emitStartMatch = 0;
+      emitEndMatch = 0;
     },
   };
 }

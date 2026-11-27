@@ -44,11 +44,16 @@ describe("createEmptySyncOutputFilter", () => {
     ).toBe("\x1b[?2025h中文输出!");
   });
 
-  test("handles back-to-back starts followed by end without dropping the valid prefix", () => {
+  test("preserves closing ?2026l when sync mode is already active", () => {
     const f = createEmptySyncOutputFilter();
     expect(
       decode(f.filter(encode("\x1b[?2026h\x1b[?2026h\x1b[?2026l"))),
-    ).toBe("\x1b[?2026h");
+    ).toBe("\x1b[?2026h\x1b[?2026l");
+    expect(
+      decode(f.filter(encode("\x1b[?2026htext\x1b[?2026h\x1b[?2026l"))),
+    ).toBe("\x1b[?2026htext\x1b[?2026l");
+    // Once closed back to idle, subsequent empty pulses are stripped again.
+    expect(decode(f.filter(encode("\x1b[?2026h\x1b[?2026l")))).toBe("");
   });
 
   test("reset clears partial match buffer across terminal snapshots", () => {

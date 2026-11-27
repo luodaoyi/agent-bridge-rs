@@ -428,6 +428,26 @@ describe("SupervisorGroup session tabs", () => {
 
       await act(async () => summary.click());
       expect(details.open).toBe(true);
+
+      // Keyboard Space/Enter activations on <summary> dispatch synthetic click in
+      // browsers; verify controlled toggle remains aligned without inversion.
+      await act(async () => {
+        summary.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+        );
+        summary.click();
+      });
+      expect(defaultPrevented).toBe(true);
+      expect(details.open).toBe(false);
+
+      await act(async () => {
+        summary.dispatchEvent(
+          new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }),
+        );
+        summary.click();
+      });
+      expect(defaultPrevented).toBe(true);
+      expect(details.open).toBe(true);
     } finally {
       document.body.removeEventListener("click", onBodyClick, false);
     }
