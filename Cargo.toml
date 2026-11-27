@@ -1,6 +1,6 @@
 [package]
 name = "agent-bridge-rs"
-version = "0.9.2"
+version = "0.9.3"
 edition = "2024"
 description = "A local runtime server and CLI bridge for Codex and Grok Build subagents"
 license = "MIT"

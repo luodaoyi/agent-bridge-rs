@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.3 - 2026-11-27
+
 - Reset detached Windows server and gated worker launches from isolated host desktops (such as Antigravity's `WinSta0\exebox-*`) back to `WinSta0\Default` when reachable (with non-interactive fallback) and pass `--no-daemon` to supporting Windows `codex` CLIs so sessions do not attach to a lingering `exebox-*` `app-server` daemon, resolving Codex `[windows] sandbox = "mxc"` `-1073741502` (`STATUS_DLL_INIT_FAILED`) child crashes under default `-s workspace-write` (Issue #36).
 
 ## 0.9.2 - 2026-11-27
