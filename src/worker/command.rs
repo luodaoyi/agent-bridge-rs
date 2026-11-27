@@ -1,3 +1,9 @@
+#[cfg(windows)]
+use std::{
+    collections::HashMap,
+    process::Stdio,
+    sync::{Mutex, OnceLock},
+};
 use std::{
     env,
     ffi::{OsStr, OsString},
@@ -188,6 +194,55 @@ pub(crate) fn strip_parent_host_env_std(command: &mut std::process::Command) {
     }
 }
 
+#[cfg(windows)]
+pub(crate) fn strip_parent_host_env_current_process() {
+    for key in PARENT_HOST_ENV_KEYS {
+        // SAFETY: Called from single-threaded `__windows-job-child` right before spawning the child worker.
+        unsafe {
+            env::remove_var(key);
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn codex_help_supports_no_daemon(help_output: &str) -> bool {
+    help_output
+        .split_whitespace()
+        .any(|token| token == "--no-daemon" || token.starts_with("--no-daemon,"))
+}
+
+#[cfg(windows)]
+pub(crate) fn codex_supports_no_daemon(bin: &OsStr) -> bool {
+    static CACHE: OnceLock<Mutex<HashMap<OsString, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = bin.to_os_string();
+    if let Ok(guard) = cache.lock()
+        && let Some(&supported) = guard.get(&key)
+    {
+        return supported;
+    }
+
+    let (program, prefix_args) = resolve_launch_target(bin);
+    let mut command = std::process::Command::new(&program);
+    command.args(&prefix_args);
+    command.arg("--help");
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    strip_parent_host_env_std(&mut command);
+
+    let supported = command.output().ok().is_some_and(|output| {
+        output.status.success()
+            && codex_help_supports_no_daemon(&String::from_utf8_lossy(&output.stdout))
+    });
+
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(key, supported);
+    }
+    supported
+}
+
+#[cfg(any(not(windows), test))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_worker_command(
     worker: WorkerKind,
@@ -200,6 +255,35 @@ pub(crate) fn build_worker_command(
     dangerously_bypass: bool,
     provider_session_id: &str,
     state_dir: Option<&Path>,
+) -> CommandBuilder {
+    build_worker_command_with_options(
+        worker,
+        bin,
+        cwd,
+        prompt,
+        model,
+        always_approve,
+        sandbox,
+        dangerously_bypass,
+        provider_session_id,
+        state_dir,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_worker_command_with_options(
+    worker: WorkerKind,
+    bin: &OsString,
+    cwd: &Path,
+    prompt: Option<&str>,
+    model: Option<&str>,
+    always_approve: bool,
+    sandbox: Option<CodexSandboxMode>,
+    dangerously_bypass: bool,
+    provider_session_id: &str,
+    state_dir: Option<&Path>,
+    codex_no_daemon: bool,
 ) -> CommandBuilder {
     let (program, prefix_args) = resolve_launch_target(bin.as_os_str());
     let mut command = CommandBuilder::new(program);
@@ -232,6 +316,9 @@ pub(crate) fn build_worker_command(
         WorkerKind::Codex => {
             command.env("AGENT_BRIDGE_SESSION_ID", provider_session_id);
             command.env("AGENT_BRIDGE_WORKER", WorkerKind::Codex.as_str());
+            if codex_no_daemon {
+                command.arg("--no-daemon");
+            }
             command.arg("-C");
             command.arg(cwd.as_os_str());
             if let Some(model) = model {

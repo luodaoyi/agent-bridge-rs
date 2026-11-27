@@ -50,7 +50,8 @@ Launch the Codex worker (default safe auto-approval uses `-s workspace-write -a 
 ```
 
 - Use `--sandbox read-only` when asking Codex for analysis/review only.
-- Use `--dangerously-bypass` ONLY when explicitly required and authorized by the user in an externally sandboxed environment.
+- Use `--sandbox danger-full-access` or `--dangerously-bypass` ONLY when explicitly required and authorized by the user (e.g. in an externally sandboxed environment).
+- Windows isolated host desktops (`WinSta0\exebox-*`): `agent-bridge` automatically resets detached server and gated worker launches back to `WinSta0\Default` when accessible and injects `--no-daemon` when supported by `codex` so default `-s workspace-write -a never` avoids lingering `exebox-*` `app-server` daemons and works with Codex `[windows] sandbox = "mxc"`. If a non-interactive environment or an older Codex CLI without `--no-daemon` still hits `-1073741502` (`STATUS_DLL_INIT_FAILED`), stop and ask the user before switching sandbox modes.
 - AGY automatically propagates `ANTIGRAVITY_CONVERSATION_ID` (fallback `ANTIGRAVITY_TRAJECTORY_ID`) as the host lease identity, and `agent-bridge` strips parent AGY/Codex env vars from the child Codex process so nested calls never cross-bind.
 
 ### Stage 3: Wait, Inspect, and Independently Verify

@@ -1,4 +1,8 @@
-use std::{env, ffi::OsString, path::Path};
+use std::{
+    env,
+    ffi::{OsStr, OsString},
+    path::Path,
+};
 
 use anyhow::{Context, Result, bail};
 
@@ -24,7 +28,9 @@ pub(in crate::session) fn build_windows_launcher_command(
     provider_session_id: &str,
     state_dir: Option<&Path>,
 ) -> Result<(CommandBuilder, WindowsLaunchGate, WindowsJob)> {
-    let worker_cmd = worker::build_worker_command(
+    let codex_no_daemon = config.worker == WorkerKind::Codex
+        && worker::codex_supports_no_daemon(config.bin.as_os_str());
+    let worker_cmd = worker::build_worker_command_with_options(
         config.worker,
         &config.bin,
         &config.cwd,
@@ -35,6 +41,7 @@ pub(in crate::session) fn build_windows_launcher_command(
         config.dangerously_bypass,
         provider_session_id,
         state_dir,
+        codex_no_daemon,
     );
     let gate = WindowsLaunchGate::create()?;
     let job = WindowsJob::create().context("failed to create the Windows worker Job Object")?;
@@ -71,17 +78,147 @@ pub(crate) fn run_windows_job_child(mut arguments: Vec<OsString>) -> Result<i32>
     let pid_report_name = arguments.remove(0);
     let program = arguments.remove(0);
     wait_for_windows_launch_gate(&gate_name, WINDOWS_LAUNCH_HANDSHAKE_TIMEOUT_MS)?;
-    let mut command = std::process::Command::new(&program);
+    if let Some(mut desktop) = crate::transport::preferred_default_desktop_wide()
+        && let Ok((child_handle, child_pid)) =
+            spawn_worker_on_desktop(&program, &arguments, &mut desktop)
+    {
+        return wait_windows_child_handle(child_handle, child_pid, &pid_report_name, &program);
+    }
+    spawn_and_wait_default_desktop(&program, &arguments, &pid_report_name)
+}
+
+#[cfg(windows)]
+fn spawn_and_wait_default_desktop(
+    program: &OsStr,
+    arguments: &[OsString],
+    pid_report_name: &OsStr,
+) -> Result<i32> {
+    let mut command = std::process::Command::new(program);
     command.args(arguments);
     worker::strip_parent_host_env_std(&mut command);
     let mut child = command
         .spawn()
         .with_context(|| format!("failed to start gated worker process {program:?}"))?;
-    report_windows_worker_pid(&pid_report_name, child.id())?;
+    report_windows_worker_pid(pid_report_name, child.id())?;
     let status = child
         .wait()
         .with_context(|| format!("failed to wait for gated worker process {program:?}"))?;
     Ok(status.code().unwrap_or(1))
+}
+
+#[cfg(windows)]
+fn wait_windows_child_handle(
+    child_handle: std::os::windows::io::OwnedHandle,
+    child_pid: u32,
+    pid_report_name: &OsStr,
+    program: &OsStr,
+) -> Result<i32> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{
+        Foundation::WAIT_FAILED,
+        System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject},
+    };
+
+    report_windows_worker_pid(pid_report_name, child_pid)?;
+    let raw = child_handle.as_raw_handle() as _;
+    if unsafe { WaitForSingleObject(raw, INFINITE) } == WAIT_FAILED {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to wait for gated worker process {program:?}"));
+    }
+    let mut exit_code = 1_u32;
+    if unsafe { GetExitCodeProcess(raw, &mut exit_code) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to read exit code for worker process {program:?}"));
+    }
+    Ok(exit_code as i32)
+}
+
+#[cfg(windows)]
+fn append_windows_quoted_arg(out: &mut Vec<u16>, arg: &OsStr) {
+    use std::os::windows::ffi::OsStrExt;
+
+    let units: Vec<u16> = arg.encode_wide().collect();
+    let needs_quotes = units.is_empty()
+        || units
+            .iter()
+            .any(|&unit| unit == b' ' as u16 || unit == b'\t' as u16 || unit == b'"' as u16);
+    if !needs_quotes {
+        out.extend_from_slice(&units);
+        return;
+    }
+    out.push(b'"' as u16);
+    let mut backslashes = 0_usize;
+    for unit in units {
+        if unit == b'\\' as u16 {
+            backslashes += 1;
+        } else if unit == b'"' as u16 {
+            out.extend(std::iter::repeat_n(b'\\' as u16, backslashes * 2 + 1));
+            backslashes = 0;
+            out.push(b'"' as u16);
+        } else {
+            out.extend(std::iter::repeat_n(b'\\' as u16, backslashes));
+            backslashes = 0;
+            out.push(unit);
+        }
+    }
+    out.extend(std::iter::repeat_n(b'\\' as u16, backslashes * 2));
+    out.push(b'"' as u16);
+}
+
+#[cfg(windows)]
+fn build_windows_command_line(program: &OsStr, args: &[OsString]) -> Vec<u16> {
+    let mut out = Vec::new();
+    append_windows_quoted_arg(&mut out, program);
+    for arg in args {
+        out.push(b' ' as u16);
+        append_windows_quoted_arg(&mut out, arg.as_os_str());
+    }
+    out.push(0);
+    out
+}
+
+#[cfg(windows)]
+fn spawn_worker_on_desktop(
+    program: &OsStr,
+    args: &[OsString],
+    desktop: &mut [u16],
+) -> std::io::Result<(std::os::windows::io::OwnedHandle, u32)> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW},
+    };
+
+    worker::strip_parent_host_env_current_process();
+    let mut cmd_line = build_windows_command_line(program, args);
+    let mut startup = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    startup.lpDesktop = desktop.as_mut_ptr();
+    let mut process = PROCESS_INFORMATION::default();
+    let created = unsafe {
+        CreateProcessW(
+            std::ptr::null(),
+            cmd_line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            &startup,
+            &mut process,
+        )
+    };
+    if created == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    unsafe {
+        CloseHandle(process.hThread);
+    }
+    let handle = unsafe { OwnedHandle::from_raw_handle(process.hProcess as _) };
+    Ok((handle, process.dwProcessId))
 }
 #[cfg(windows)]
 impl WindowsLaunchGate {
@@ -251,5 +388,66 @@ pub(in crate::session) fn report_windows_worker_pid(
         Err(std::io::Error::last_os_error()).context("failed to report the Windows Grok process ID")
     } else {
         Ok(())
+    }
+}
+
+#[cfg(all(windows, test))]
+mod tests {
+    use std::{
+        ffi::{OsStr, OsString},
+        os::windows::io::AsRawHandle,
+    };
+
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, INFINITE, WaitForSingleObject,
+    };
+
+    use super::{build_windows_command_line, spawn_worker_on_desktop};
+
+    fn decode_cmd(units: &[u16]) -> String {
+        let trimmed = units.strip_suffix(&[0]).unwrap_or(units);
+        String::from_utf16_lossy(trimmed)
+    }
+
+    #[test]
+    fn builds_quoted_windows_command_lines_for_spaces_quotes_and_backslashes() {
+        let args = vec![
+            OsString::from(""),
+            OsString::from("plain"),
+            OsString::from("two words"),
+            OsString::from(r#"a\"b"#),
+            OsString::from(r"trail\"),
+            OsString::from(r"trail space\"),
+        ];
+        let cmd = decode_cmd(&build_windows_command_line(
+            OsStr::new(r"C:\Program Files\nodejs\node.exe"),
+            &args,
+        ));
+        assert_eq!(
+            cmd,
+            r#""C:\Program Files\nodejs\node.exe" "" plain "two words" "a\\\"b" trail\ "trail space\\""#
+        );
+    }
+
+    #[test]
+    fn spawns_worker_process_on_default_desktop() {
+        let mut desktop: Vec<u16> = "WinSta0\\Default\0".encode_utf16().collect();
+        let args = vec![
+            OsString::from("/d"),
+            OsString::from("/c"),
+            OsString::from("exit"),
+            OsString::from("0"),
+        ];
+        let (handle, pid) = spawn_worker_on_desktop(OsStr::new("cmd.exe"), &args, &mut desktop)
+            .expect("spawn cmd.exe on WinSta0\\Default");
+        assert_ne!(pid, 0);
+        let wait = unsafe { WaitForSingleObject(handle.as_raw_handle() as _, INFINITE) };
+        assert_eq!(wait, 0);
+        let mut code = 1_u32;
+        assert_ne!(
+            unsafe { GetExitCodeProcess(handle.as_raw_handle() as _, &mut code) },
+            0
+        );
+        assert_eq!(code, 0);
     }
 }

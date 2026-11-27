@@ -28,22 +28,21 @@ fn should_retry_without_breakaway(raw_os_error: Option<i32>) -> bool {
 }
 
 #[cfg(windows)]
-pub(in crate::transport) fn start_detached_server() -> Result<()> {
-    let executable = env::current_exe().context("failed to locate agent-bridge executable")?;
-    let mut application = executable.as_os_str().encode_wide().collect::<Vec<_>>();
-    application.push(0);
-    let mut command_line_template =
-        OsString::from(format!("\"{}\" __server", executable.display()))
-            .encode_wide()
-            .collect::<Vec<_>>();
-    command_line_template.push(0);
-    let startup = STARTUPINFOW {
+fn spawn_detached_with_desktop(
+    application: &[u16],
+    command_line_template: &[u16],
+    desktop: Option<&mut [u16]>,
+) -> std::io::Result<PROCESS_INFORMATION> {
+    let mut startup = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
         ..Default::default()
     };
+    if let Some(buf) = desktop {
+        startup.lpDesktop = buf.as_mut_ptr();
+    }
     let flags = detached_server_creation_flags();
     let mut process = PROCESS_INFORMATION::default();
-    let mut command_line = command_line_template.clone();
+    let mut command_line = command_line_template.to_vec();
     let mut created = unsafe {
         CreateProcessW(
             application.as_ptr(),
@@ -62,7 +61,7 @@ pub(in crate::transport) fn start_detached_server() -> Result<()> {
         let error = std::io::Error::last_os_error();
         if should_retry_without_breakaway(error.raw_os_error()) {
             process = PROCESS_INFORMATION::default();
-            command_line = command_line_template;
+            command_line = command_line_template.to_vec();
             created = unsafe {
                 CreateProcessW(
                     application.as_ptr(),
@@ -78,12 +77,36 @@ pub(in crate::transport) fn start_detached_server() -> Result<()> {
                 )
             };
         } else {
-            return Err(error).context("failed to spawn runtime server");
+            return Err(error);
         }
     }
     if created == 0 {
-        return Err(std::io::Error::last_os_error()).context("failed to spawn runtime server");
+        return Err(std::io::Error::last_os_error());
     }
+    Ok(process)
+}
+
+#[cfg(windows)]
+pub(in crate::transport) fn start_detached_server() -> Result<()> {
+    let executable = env::current_exe().context("failed to locate agent-bridge executable")?;
+    let mut application = executable.as_os_str().encode_wide().collect::<Vec<_>>();
+    application.push(0);
+    let mut command_line_template =
+        OsString::from(format!("\"{}\" __server", executable.display()))
+            .encode_wide()
+            .collect::<Vec<_>>();
+    command_line_template.push(0);
+    let process = if let Some(mut desktop) = super::desktop::preferred_default_desktop_wide() {
+        match spawn_detached_with_desktop(&application, &command_line_template, Some(&mut desktop))
+        {
+            Ok(process) => process,
+            Err(_) => spawn_detached_with_desktop(&application, &command_line_template, None)
+                .context("failed to spawn runtime server")?,
+        }
+    } else {
+        spawn_detached_with_desktop(&application, &command_line_template, None)
+            .context("failed to spawn runtime server")?
+    };
     unsafe {
         CloseHandle(process.hThread);
         CloseHandle(process.hProcess);
