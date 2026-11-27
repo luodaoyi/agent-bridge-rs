@@ -100,16 +100,27 @@ impl Session {
         // A lone Ctrl-C interrupts the current turn; enqueue it without
         // starting a new one, keeping the bytes sent to the PTY unchanged.
         let starts_turn = !(input.len() == 1 && input.as_bytes()[0] == 0x03);
-        let data = if input.len() == 1 && input.as_bytes()[0].is_ascii_control() {
-            input.into_bytes()
+        let (data, followup) = if input.len() == 1 && input.as_bytes()[0].is_ascii_control() {
+            (input.into_bytes(), None)
         } else {
+            let worker = self
+                .inner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("session state lock was poisoned"))?
+                .worker;
             let mut data = Vec::with_capacity(input.len() + 13);
             data.extend_from_slice(b"\x1b[200~");
             data.extend_from_slice(input.as_bytes());
-            data.extend_from_slice(b"\x1b[201~\r");
-            data
+            data.extend_from_slice(b"\x1b[201~");
+            match worker {
+                WorkerKind::Codex => (data, Some((CODEX_PASTE_SUBMIT_DELAY, b"\r".to_vec()))),
+                WorkerKind::Grok => {
+                    data.push(b'\r');
+                    (data, None)
+                }
+            }
         };
-        self.enqueue_input(data, starts_turn)
+        self.enqueue_input(data, followup, starts_turn)
     }
 
     pub(super) fn write_raw(&self, data: Vec<u8>) -> Result<()> {
@@ -120,10 +131,15 @@ impl Session {
             bail!("terminal data exceeds the 64 KiB limit");
         }
         let starts_turn = raw_input_starts_turn(&data);
-        self.enqueue_input(data, starts_turn)
+        self.enqueue_input(data, None, starts_turn)
     }
 
-    pub(super) fn enqueue_input(&self, data: Vec<u8>, starts_turn: bool) -> Result<()> {
+    pub(super) fn enqueue_input(
+        &self,
+        data: Vec<u8>,
+        followup: Option<(Duration, Vec<u8>)>,
+        starts_turn: bool,
+    ) -> Result<()> {
         if self.shutdown.load(Ordering::Acquire) {
             bail!("session has already stopped");
         }
@@ -148,7 +164,7 @@ impl Session {
         };
         // Byte budget is checked before any byte is queued; queue-full rejection
         // is always whole-input (never a partial write).
-        let data_len = data.len();
+        let data_len = data.len() + followup.as_ref().map_or(0, |(_, data)| data.len());
         if self
             .pending_writer_bytes
             .load(Ordering::Acquire)
@@ -172,6 +188,7 @@ impl Session {
             .fetch_add(data_len, Ordering::Release);
         match writer.try_send(WriterItem {
             data,
+            followup,
             budget: data_len,
         }) {
             Ok(()) => {
@@ -290,6 +307,7 @@ impl Session {
             writer.as_ref().map(|writer| {
                 writer.try_send(WriterItem {
                     data: response,
+                    followup: None,
                     budget: 0,
                 })
             })
@@ -462,20 +480,44 @@ pub(super) fn spawn_writer(
 ) {
     thread::spawn(move || {
         while let Ok(item) = writer_rx.recv() {
-            // Only the item's admitted budget is released: inputs release their
-            // payload bytes, terminal responses release nothing, so the counter
-            // tracks exactly the queued input bytes and can never underflow.
-            if let Err(error) = writer.write_all(&item.data).and_then(|()| writer.flush()) {
-                // The item left the queue, so release its budget too. Any items
-                // still queued when the channel later closes are dropped without
-                // release, but the session is terminating at that point and no
-                // further admission happens.
-                session
-                    .pending_writer_bytes
-                    .fetch_sub(item.budget, Ordering::Acquire);
+            let result = (|| {
+                if session.shutdown.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                writer.write_all(&item.data)?;
+                writer.flush()?;
+                if let Some((delay, followup_data)) = item.followup {
+                    let deadline = Instant::now() + delay;
+                    loop {
+                        if session.shutdown.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        thread::sleep(remaining.min(Duration::from_millis(20)));
+                    }
+                    writer.write_all(&followup_data)?;
+                    writer.flush()?;
+                }
+                Ok::<(), std::io::Error>(())
+            })();
+            // Release both writes together, including on failure or cancellation.
+            session
+                .pending_writer_bytes
+                .fetch_sub(item.budget, Ordering::Acquire);
+            if let Err(error) = result {
                 session.mark_writer_error(format!("failed to write Grok input: {error}"));
-                return;
+                break;
             }
+            if session.shutdown.load(Ordering::Acquire) {
+                break;
+            }
+        }
+        // Stop admission before releasing items abandoned after an error or shutdown.
+        session.close_writer();
+        for item in writer_rx.try_iter() {
             session
                 .pending_writer_bytes
                 .fetch_sub(item.budget, Ordering::Acquire);

@@ -25,7 +25,8 @@
 
 ### 3. Codex `0.172.0` TUI `PasteBurst` 吞掉括号粘贴后紧跟的 `\r`
 - **现象**：`create --prompt` 作为命令行参数可直接触发首轮任务，但多轮调用 `send --text` 时将 `\x1b[200~...\x1b[201~\r` 一次性写入 ConPTY，Codex `0.172.0` 终端组件把瞬时 `\r` 判入粘贴突发窗口而未触发提交（文本停留在输入框）。
-- **规则**：面向存活 TUI 会话的高层 `send --text` 若目标是 Codex TUI，需将粘贴体与提交回车做语义/时序隔离；在自动化无交互场景（如 `magpie-loop`）优先使用 `codex exec` stdin 模式。该问题已记录为 `v0.9.1` 首批待修 Issue。
+- **规则**：Codex 高层 `send --text` 将括号粘贴与回车作为同一个队列项：粘贴体写入并 flush 后等待 200ms，再单独写入并 flush 回车，避免 PasteBurst 吞掉提交且不允许其他输入插队。两段字节必须合并计入准入预算；完成、失败及关闭取消均释放完整预算，writer 停止时也释放队列剩余预算。等待期间每约 20ms 检查关闭标志，取消时不得补写回车或记录错误。单字节 ASCII 控制输入、原始写入及 Grok 的单次写入保持原行为。在自动化无交互场景（如 `magpie-loop`）仍优先使用 `codex exec` stdin 模式。
+- **守卫测试**：`codex_send_separates_paste_from_submit`、`codex_send_admits_paste_and_submit_budget_together`、`codex_writer_flushes_paste_then_delayed_submit_without_interleaving`、`writer_shutdown_cancels_followup_and_releases_all_pending_bytes`、`writer_errors_release_paste_followup_and_queued_budgets`、`controls_raw_writes_and_grok_send_have_no_followup`（位于 `src/session/tests.rs`）。这些测试验证队列与 writer 行为，真实 Codex TUI 提交仍需实机验收。
 
 ### 4. Windows ConPTY 快速失败退出必须释放 `master` 句柄（`3d101ec`）
 - **现象**：子进程启动后秒退（`exit_code = 1`），`mark_exit` 设置了 `process_done = true`，但 ConPTY 读端管道未收到 EOF（`reader_done = false`），导致会话长期停在 `phase = running`、`wait --for tui-idle` 超时 180 秒。

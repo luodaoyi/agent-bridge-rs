@@ -18,6 +18,11 @@
   - `--dangerously-bypass` 独占映射 `--dangerously-bypass-approvals-and-sandbox`。
   - Windows 桌面重置与守护进程隔离：当宿主（如 Antigravity 的 `WinSta0\exebox-*` 工具 shell）在非 `Default` 的交互式桌面上拉起 `agent-bridge` 时，`start_detached_server` 与 `run_windows_job_child` 会先确认当前属于 `WinSta0` 且可打开 `Default` 桌面，然后以 `STARTUPINFOW.lpDesktop = "WinSta0\\Default"` 启动后台服务与 gated worker（非交互窗口站或打开失败时回退 `NULL`）；同时在 Windows 下探测到 `codex --help` 支持 `--no-daemon` 时自动注入 `--no-daemon`，防止新会话误连先前在 `exebox-*` 上启动的共享 Codex `app-server` 守护进程，从而根治 `mxc` 下 `0xC0000142` / `-1073741502` 崩溃。
   - 若处于非交互窗口站或旧版 Codex 不支持 `--no-daemon`，可重启用交互桌面启动的 `app-server`，或按需经授权改用 `-c windows.sandbox="unelevated"` / `--sandbox danger-full-access`。
+- **TUI 输入与提交时序**（`Session::send`、`Session::enqueue_input`、`spawn_writer`，见 [src/session/io.rs](../../src/session/io.rs)）：
+  - Codex 普通 `send --text` 将括号粘贴体与提交回车放进同一个 `WriterItem`：先写入并 flush `\x1b[200~<input>\x1b[201~`，再等待 `CODEX_PASTE_SUBMIT_DELAY`（200ms），最后单独写入并 flush `\r`。这样避开 Codex 0.172+ TUI 的 PasteBurst 窗口，同时避免其他输入或终端响应插入两次写入之间。
+  - 队列按粘贴体与回车的总字节数一次性准入；完成、写入或 flush 失败、关闭取消时均释放完整预算，停止 writer 时也释放尚未处理的队列项预算。
+  - 延迟期间每约 20ms 检查 `shutdown`；关闭会取消后续回车，不记录 writer 错误。
+  - 单字节 ASCII 控制输入和所有 `write_raw` 均无后续写入，原始字节不变；Grok 仍在一次写入中发送 `\x1b[200~<input>\x1b[201~\r`。
 - **快速退出与状态收敛**（`mark_exit`、`mark_reader_done`、`finalize_session`、`SessionRegistry::wait`）：
   - Windows ConPTY 下子进程自然快速退出时，`mark_exit` 须立即关闭 writer 并释放 `master` 句柄触发 `ClosePseudoConsole`，使 reader 排空剩余输出并到达 EOF；`WaitCondition::TuiIdle` 在 `process_done` 置位后即刻结束等待，避免无意义的 180 秒阻塞。
 - **阻塞与标题启发式**（`blocked_reason`、`phase_from_title`）：
