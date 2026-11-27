@@ -15,7 +15,8 @@ export {
   parseAutomationBlock,
   selectNextIssue,
 } from './magpie-loop/issues.mjs';
-export { unwrapWindowsCmdShim } from './magpie-loop/execution.mjs';
+export { needsWebuiDistBootstrap, unwrapWindowsCmdShim } from './magpie-loop/execution.mjs';
+export { evaluateSelfReviewOutput } from './magpie-loop/workflow.mjs';
 
 function getRepoSlug(rootDir) {
   return execFileSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], {
@@ -59,7 +60,7 @@ function parseCliArgs(argv) {
     task: null,
     title: null,
     runner: 'codex',
-    sandbox: process.platform === 'win32' ? 'danger-full-access' : 'workspace-write',
+    sandbox: 'workspace-write',
     model: null,
     maxRetries: 2,
     maxIssues: 3,
@@ -104,7 +105,7 @@ function parseCliArgs(argv) {
           'Options:',
           '  --title <text>        Optional short title used with --task',
           '  --runner <name>       codex (default) | claude | grok',
-          '  --sandbox <mode>      Codex sandbox (default: danger-full-access on Windows, workspace-write on Unix)',
+          '  --sandbox <mode>      Codex sandbox (default: workspace-write)',
           '  --model <model>       Override worker model',
           '  --max-retries <n>     Max repair rounds per task/issue (default: 2)',
           '  --max-issues <n>      Max issues per --loop invocation (default: 3)',

@@ -210,11 +210,13 @@ export function buildFixPrompt({ issue, attempt, previousFailure }) {
   lines.push(
     retrySection,
     '## Strict Rules',
+    '- Verify every Acceptance Criterion listed in the target description (or document concrete evaluation rationale for any skipped option).',
     '- Write a failing regression test FIRST using exact reported bytes/behavior when fixing a bug.',
-    '- Keep changes minimal and scoped strictly to this task.',
+    '- Keep changes minimal and scoped strictly to this task; keep every production `.rs`/`.mjs` file <= 600 lines with zero production `unwrap()`/`expect()`.',
+    '- Update `CHANGELOG.md` (`## Unreleased`) for user-visible `src/` or `webui/` changes.',
     '- Do NOT modify `.github/workflows/**`.',
     '- Do NOT run `git commit`, `git push`, `git tag`, or `gh pr create` — the outer loop handles delivery.',
-    '- Run full relevant checks (`cargo fmt --check`, `cargo test --all-targets --locked`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, and `cd webui && npm test && npm run build` if WebUI changed) and summarize what you changed and observed.'
+    '- Run full relevant checks (`cargo fmt --check`, `cargo test --all-targets --locked`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, `node scripts/check-governance.mjs`, and `cd webui && npm test && npm run build` if WebUI changed) and summarize what you changed and observed.'
   );
   return lines.join('\n');
 }
@@ -229,6 +231,9 @@ export function formatCommitAndPrBody({ issue, summary, checksRun, changedFiles 
   lines.push(
     '## Summary',
     cleanSummary,
+    '',
+    '## Acceptance Criteria Checklist',
+    '- Verified against issue requirements and regression tests.',
     '',
     '## Changed Files',
     ...changedFiles.map((f) => `- \`${f}\``),

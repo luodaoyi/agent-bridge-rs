@@ -22,7 +22,7 @@
 ## 3. WebUI 与多语言规范
 
 1. **全部可见文本进 i18n**：新增或修改 WebUI 文案时须同步维护 `webui/src/i18n/catalog/` 下全部 15 个语言目录，确保 `webui` 单测通过。
-2. **终端默认只读**：WebUI 终端默认保持只读观测，仅在用户显式打开输入开关时转发输入与 resize 命令；不引入任何登录以外的公网暴露逻辑（严格绑定 loopback）。
+2. **终端默认只读**：WebUI 终端默认保持只读观测；只读态与视口自动同步会发送 `terminal_resize`，但绝不刷新宿主 CLI 租约；仅在用户显式打开交互开关并发送 `terminal_input` 时才写入按键并刷新租约，且服务端严格绑定 loopback。
 3. **内嵌构建同步**：修改 `webui/` 后必须在提交前运行 `npm test && npm run build`，保证本地与 CI 嵌入最新产物。
 
 ## 4. 测试与真实复现纪律
@@ -35,4 +35,5 @@
 
 1. **文档禁行号锚**：`docs/subsystems/` 与本文件引用代码只写文件路径或符号名（如 `src/worker.rs`、`resolve_worker_bin`），禁止在文件路径后附加冒号行号或 L 片段行号锚，以免代码微调后文档失真。
 2. **一提交一目标，独占 Worktree**：自动 Loop 或并行任务必须在 `.worktrees/<task>` 独立分支作业；Commit Body 写清受影响子系统、实跑验证命令与回归测试名称。
-3. **不留无效状态**：`git status --short` 不得遗留临时日志、未跟踪补丁或无关文件的修改。
+3. **生产源码文件上限**：`src/`（非测试模块）与 `scripts/` 下所有生产源码文件不得超过 **600 行**（由 `scripts/check-governance.mjs` 的 `validateProductionLimits` 自动阻断）。
+4. **不留无效状态**：`git status --short` 不得遗留临时日志、未跟踪补丁或无关文件的修改。

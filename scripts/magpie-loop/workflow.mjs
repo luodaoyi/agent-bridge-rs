@@ -4,6 +4,28 @@ import { dirname, join } from 'node:path';
 import { buildFixPrompt, detectHoldComment, formatCommitAndPrBody } from './issues.mjs';
 import { invokeWorkerRunner, runCommand, runVerificationSuite } from './execution.mjs';
 
+export function evaluateSelfReviewOutput({ exitStatus, rawOutput }) {
+  if (exitStatus !== 0) {
+    return { ok: false, reason: `Self-review runner exited ${exitStatus}` };
+  }
+  const text = String(rawOutput || '').trim();
+  if (!text) {
+    return { ok: false, reason: 'Self-review produced empty output (fail-closed)' };
+  }
+  const jsonCandidate = text.match(/\{[\s\S]*\}/)?.[0] || text;
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonCandidate);
+  } catch (error) {
+    return { ok: false, reason: `Self-review output was not valid JSON (fail-closed): ${error.message}` };
+  }
+  if (parsed.verdict === 'approve') {
+    return { ok: true, reason: null };
+  }
+  const issues = Array.isArray(parsed.issues) && parsed.issues.length > 0 ? parsed.issues.join('\n') : JSON.stringify(parsed);
+  return { ok: false, reason: `Self-review verdict=${parsed.verdict || 'unknown'}:\n${issues}` };
+}
+
 export function processSingleIssue(rootDir, repo, issue, options) {
   const isAdhoc = issue.number === null || issue.number === undefined;
   const stamp = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
@@ -127,7 +149,8 @@ export function processSingleIssue(rootDir, repo, issue, options) {
         const targetLabel = isAdhoc ? `Ad-hoc Task: ${issue.title}` : `Issue #${issue.number}: ${issue.title}`;
         const reviewPrompt = [
           `Review git diff in this worktree for ${targetLabel}.`,
-          'Check LESSONS.md and docs/code-standards.md. Output JSON only: {"verdict":"approve"|"request_changes","issues":["..."]}.',
+          'Verify every Acceptance Criterion in the issue/task plus LESSONS.md and docs/code-standards.md.',
+          'Output JSON only: {"verdict":"approve"|"request_changes","issues":["..."]}.',
         ].join('\n');
         const reviewRes = invokeWorkerRunner({
           runner: options.runner === 'grok' ? 'codex' : options.runner,
@@ -137,16 +160,14 @@ export function processSingleIssue(rootDir, repo, issue, options) {
           prompt: reviewPrompt,
           summaryFile: reviewFile,
         });
-        if (reviewRes.status === 0 && existsSync(reviewFile)) {
-          try {
-            const parsed = JSON.parse(readFileSync(reviewFile, 'utf8'));
-            if (parsed.verdict === 'request_changes') {
-              previousFailure = `Self-review requested changes:\n${(parsed.issues || []).join('\n')}`;
-              continue;
-            }
-          } catch {
-            // Non-JSON self-review output does not block deterministic checks.
-          }
+        const rawOutput = existsSync(reviewFile) ? readFileSync(reviewFile, 'utf8') : '';
+        const reviewVerdict = evaluateSelfReviewOutput({
+          exitStatus: reviewRes.status,
+          rawOutput,
+        });
+        if (!reviewVerdict.ok) {
+          previousFailure = reviewVerdict.reason;
+          continue;
         }
       }
 

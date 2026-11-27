@@ -1,4 +1,5 @@
 Fixes #
+<!-- Important: Keep closing keywords unquoted (e.g. "Fixes #36", NOT "`Fixes #36`") so GitHub auto-closes the linked issue on merge. -->
 
 ## Affected Subsystem(s)
 
@@ -14,6 +15,14 @@ Fixes #
 - **Before**:
 - **After**:
 
+## Acceptance Criteria Mapping
+
+- [ ] AC 1 -> `<test name / verification evidence or documented evaluation rationale>`
+
+## Changelog
+
+- [ ] Updated `CHANGELOG.md` under `## Unreleased` (required for user-facing `src/` / `webui/` / `hooks/` / `skills/` changes unless waived below)
+
 ## Verification Commands Run
 
 - [ ] `node scripts/check-governance.mjs`
@@ -25,6 +34,7 @@ Fixes #
 - [ ] `cd webui && npm test && npm run build` (if `webui/` changed)
 
 <!-- Optional governance waivers (uncomment only when applicable):
-No-Test-Reason: <explain why src/*.rs change did not add a new test>
+No-Test-Reason: <explain why src/webui/scripts change did not add a new test>
+No-Changelog-Reason: <explain why user-facing runtime change does not need a CHANGELOG entry>
 Security-Boundary: <explain trust/permission boundary if .github/workflows/* changed>
 -->

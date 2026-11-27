@@ -10,13 +10,22 @@ import {
   extractCargoVersion,
   validateDiff,
   validateDocs,
+  validateLessons,
   validateManifestsAndHooks,
+  validateProductionLimits,
 } from '../scripts/check-governance.mjs';
+import {
+  detectReworkCommits,
+  findPromotionCandidates,
+  parseLessonsMarkdown,
+} from '../scripts/lessons-audit.mjs';
 import {
   buildAdhocIssue,
   buildFixPrompt,
   detectHoldComment,
+  evaluateSelfReviewOutput,
   formatCommitAndPrBody,
+  needsWebuiDistBootstrap,
   selectNextIssue,
   unwrapWindowsCmdShim,
 } from '../scripts/magpie-loop.mjs';
@@ -89,7 +98,7 @@ test('validateDiff enforces tests on src changes unless waived and protects work
   const waived = validateDiff({
     changedFiles: ['src/worker.rs'],
     diffText: srcOnlyDiff,
-    prBody: 'No-Test-Reason: pure refactor exercised by existing test suite',
+    prBody: 'No-Test-Reason: pure refactor exercised by existing test suite\nNo-Changelog-Reason: pure internal refactor',
   });
   assert.equal(waived.ok, true);
 
@@ -105,7 +114,7 @@ test('validateDiff enforces tests on src changes unless waived and protects work
     '+    }',
   ].join('\n');
   const inlineRustTestOk = validateDiff({
-    changedFiles: ['src/foo.rs'],
+    changedFiles: ['src/foo.rs', 'CHANGELOG.md'],
     diffText: inlineRustTestDiff,
     prBody: '',
   });
@@ -206,4 +215,156 @@ test('release-bump computes semver bumps and promotes Unreleased section', () =>
   assert.equal(computeNextVersion('0.9.4', 'minor'), '0.10.0');
   const updated = promoteChangelog('# Changelog\n\n## Unreleased\n\n## 0.9.0 - 2026-11-26\n', '0.9.1', '2026-11-27');
   assert.match(updated, /## Unreleased\s+## 0\.9\.1 - 2026-11-27\s+## 0\.9\.0 - 2026-11-26/);
+});
+
+test('validateProductionLimits passes on repository root and catches >600-line production files', () => {
+  const rootRes = validateProductionLimits(ROOT_DIR);
+  assert.equal(rootRes.ok, true, rootRes.errors.join('\n'));
+  assert.ok(rootRes.checkedFiles > 0);
+
+  const dir = mkdtempSync(join(tmpdir(), 'ab-limits-test-'));
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    mkdirSync(join(dir, 'scripts'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'huge.rs'), `${'fn x() {}\n'.repeat(601)}`);
+    writeFileSync(join(dir, 'src', 'tests.rs'), `${'fn t() {}\n'.repeat(700)}`);
+    writeFileSync(join(dir, 'scripts', 'big.mjs'), `${'const x = 1;\n'.repeat(605)}`);
+    const res = validateProductionLimits(dir);
+    assert.equal(res.ok, false);
+    assert.ok(res.errors.some((e) => e.includes('src/huge.rs')));
+    assert.ok(res.errors.some((e) => e.includes('scripts/big.mjs')));
+    assert.ok(!res.errors.some((e) => e.includes('src/tests.rs')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('validateLessons validates repository LESSONS.md and rejects malformed entries', () => {
+  const rootRes = validateLessons(ROOT_DIR);
+  assert.equal(rootRes.ok, true, rootRes.errors.join('\n'));
+  assert.ok(rootRes.checkedEntries >= 6);
+
+  const dir = mkdtempSync(join(tmpdir(), 'ab-lessons-test-'));
+  try {
+    writeFileSync(dir + '/LESSONS.md', '# LESSONS\n\n### 1. Missing metadata\n- **现象**: test\n');
+    const res = validateLessons(dir);
+    assert.equal(res.ok, false);
+    assert.ok(res.errors.some((e) => e.includes('Seen')));
+    assert.ok(res.errors.some((e) => e.includes('Status')));
+    assert.ok(res.errors.some((e) => e.includes('Guard')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('validateDiff enforces prod unwrap, webui/script test coverage, backtick closing keywords, and CHANGELOG sync', () => {
+  const unwrapDiff = [
+    'diff --git a/src/foo.rs b/src/foo.rs',
+    '@@ -10,1 +10,2 @@ fn prod() {',
+    '+    let x = val.unwrap();',
+  ].join('\n');
+  const unwrapBlocked = validateDiff({
+    changedFiles: ['src/foo.rs', 'src/tests.rs', 'CHANGELOG.md'],
+    diffText: unwrapDiff,
+    prBody: '',
+  });
+  assert.equal(unwrapBlocked.ok, false);
+  assert.ok(unwrapBlocked.errors.some((e) => e.includes('.unwrap()')));
+
+  const testModuleUnwrapAllowed = validateDiff({
+    changedFiles: ['src/foo.rs', 'CHANGELOG.md'],
+    diffText: [
+      'diff --git a/src/foo.rs b/src/foo.rs',
+      '@@ -50,1 +50,4 @@',
+      '+#[cfg(test)]',
+      '+mod tests {',
+      '+    #[test] fn ok() { assert_eq!(Some(1).unwrap(), 1); }',
+      '+}',
+    ].join('\n'),
+    prBody: '',
+  });
+  assert.equal(testModuleUnwrapAllowed.ok, true, testModuleUnwrapAllowed.errors.join('\n'));
+
+  const webuiBlocked = validateDiff({
+    changedFiles: ['webui/src/App.jsx', 'CHANGELOG.md'],
+    diffText: 'diff --git a/webui/src/App.jsx b/webui/src/App.jsx\n@@ -1 +1 @@\n+export const x = 1;',
+    prBody: '',
+  });
+  assert.equal(webuiBlocked.ok, false);
+  assert.ok(webuiBlocked.errors.some((e) => e.includes('webui test')));
+
+  const scriptsBlocked = validateDiff({
+    changedFiles: ['scripts/check-governance.mjs'],
+    diffText: 'diff --git a/scripts/check-governance.mjs b/scripts/check-governance.mjs\n@@ -1 +1 @@\n+export const y = 2;',
+    prBody: '',
+  });
+  assert.equal(scriptsBlocked.ok, false);
+  assert.ok(scriptsBlocked.errors.some((e) => e.includes('test/*.test.js')));
+
+  const backtickKeyword = validateDiff({
+    changedFiles: ['README.md'],
+    diffText: 'diff --git a/README.md b/README.md\n@@ -1 +1 @@\n+docs',
+    prBody: 'Summary (`Fixes #36`).',
+  });
+  assert.equal(backtickKeyword.ok, false);
+  assert.ok(backtickKeyword.errors.some((e) => e.includes('backticks')));
+
+  const missingChangelog = validateDiff({
+    changedFiles: ['src/session.rs', 'src/session/tests.rs'],
+    diffText: 'diff --git a/src/session/tests.rs b/src/session/tests.rs\n@@ -1 +1 @@\n+#[test] fn x() {}',
+    prBody: '',
+  });
+  assert.equal(missingChangelog.ok, false);
+  assert.ok(missingChangelog.errors.some((e) => e.includes('CHANGELOG.md')));
+});
+
+test('magpie-loop fail-closed self-review and webui/dist bootstrap checks behave deterministically', () => {
+  assert.equal(needsWebuiDistBootstrap(['src/worker.rs'], false), true);
+  assert.equal(needsWebuiDistBootstrap(['src/worker.rs'], true), false);
+  assert.equal(needsWebuiDistBootstrap(['webui/src/App.jsx'], false), false);
+
+  assert.equal(evaluateSelfReviewOutput({ exitStatus: 1, rawOutput: '{"verdict":"approve"}' }).ok, false);
+  assert.equal(evaluateSelfReviewOutput({ exitStatus: 0, rawOutput: 'not-json' }).ok, false);
+  assert.equal(
+    evaluateSelfReviewOutput({
+      exitStatus: 0,
+      rawOutput: '{"verdict":"request_changes","issues":["missing AC test"]}',
+    }).ok,
+    false
+  );
+  assert.equal(
+    evaluateSelfReviewOutput({
+      exitStatus: 0,
+      rawOutput: '```json\n{"verdict":"approve","issues":[]}\n```',
+    }).ok,
+    true
+  );
+});
+
+test('lessons-audit parses metadata, finds Seen>=3 active candidates, and flags rework commits', () => {
+  const sample = [
+    '### 1. Promoted one',
+    '- **Seen**: 4 (2026-11-24, 2026-11-25, 2026-11-26)',
+    '- **Status**: promoted',
+    '- **Guard**: test_a',
+    '### 2. Ready to promote',
+    '- **Seen**: 3 (2026-11-25, 2026-11-26, 2026-11-27)',
+    '- **Status**: active',
+    '- **Guard**: test_b',
+    '### 3. Single occurrence',
+    '- **Seen**: 1 (2026-11-27)',
+    '- **Status**: active',
+    '- **Guard**: test_c',
+  ].join('\n');
+
+  const parsed = parseLessonsMarkdown(sample);
+  assert.equal(parsed.length, 3);
+  const candidates = findPromotionCandidates(parsed, 3);
+  assert.deepEqual(candidates.map((c) => c.number), [2]);
+
+  const flagged = detectReworkCommits([
+    { sha: '1111111', date: '2026-11-27', subject: 'feat: add normal endpoint', body: '' },
+    { sha: '2222222', date: '2026-11-27', subject: 'fix: address review feedback on filter', body: '' },
+  ]);
+  assert.deepEqual(flagged.map((c) => c.sha), ['2222222']);
 });
