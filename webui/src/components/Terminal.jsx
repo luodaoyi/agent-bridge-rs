@@ -8,6 +8,7 @@ import {
   encodeUtf8ToBase64,
 } from "../utils/base64.js";
 import { subscribeTerminal } from "../utils/terminalFeeds.js";
+import { createEmptySyncOutputFilter } from "../utils/terminalFilter.js";
 import { clampTerminalGrid } from "../utils/terminalGrid.js";
 import {
   TERMINAL_HEIGHT_DEFAULT,
@@ -28,6 +29,7 @@ const DEFAULT_ROWS = 24;
 const DEFAULT_COLS = 80;
 const RESIZE_STEP_PX = 24;
 const RESIZE_DEBOUNCE_MS = 120;
+const COALESCE_MAX_BYTES = 256 * 1024;
 /** Bounded delay before one automatic resize retry after an immediate send
  *  failure, routed through the existing scheduleFit flow. */
 export const RESIZE_RETRY_MS = 300;
@@ -48,6 +50,17 @@ function safeCols(cols) {
   return Math.min(Math.floor(value), 500);
 }
 
+function concatUint8Arrays(chunks, totalLength) {
+  if (chunks.length === 1) return chunks[0];
+  const merged = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return merged;
+}
+
 /**
  * Per-terminal FIFO drain for xterm writes.
  * xterm `write(data, callback)` parses asynchronously; a later `reset()` must
@@ -56,6 +69,7 @@ function safeCols(cols) {
  */
 export function createTerminalWriteQueue(term) {
   const queue = [];
+  const syncFilter = createEmptySyncOutputFilter();
   let busy = false;
   let disposed = false;
 
@@ -77,37 +91,75 @@ export function createTerminalWriteQueue(term) {
     }
   };
 
-  const processEntry = (entry, done) => {
-    if (disposed) {
-      done();
-      return;
-    }
-    const bytes = decodeBase64ToUint8Array(entry.data_base64);
-    if (entry.reset) {
-      try {
-        term.reset();
-      } catch {
-        /* ignore reset races after dispose */
-      }
-      writeBytes(bytes, done);
-      return;
-    }
-    writeBytes(bytes, done);
-  };
-
   const pump = () => {
     if (disposed || busy) return;
-    const entry = queue.shift();
-    if (!entry) return;
-    busy = true;
-    processEntry(entry, () => {
-      busy = false;
-      if (disposed) {
-        queue.length = 0;
+    while (queue.length > 0 && !disposed) {
+      const entry = queue.shift();
+      if (!entry) continue;
+      if (entry.reset) {
+        syncFilter.reset();
+        const bytes = syncFilter.filter(
+          decodeBase64ToUint8Array(entry.data_base64),
+        );
+        busy = true;
+        try {
+          term.reset();
+        } catch {
+          /* ignore reset races after dispose */
+        }
+        writeBytes(bytes, () => {
+          busy = false;
+          if (disposed) {
+            queue.length = 0;
+            return;
+          }
+          pump();
+        });
         return;
       }
-      pump();
-    });
+
+      // Coalesce consecutive non-reset delta entries in the backlog so xterm
+      // parses one chunk instead of scheduling back-to-back DOM renders.
+      const chunks = [];
+      let totalBytes = 0;
+      const firstBytes = syncFilter.filter(
+        decodeBase64ToUint8Array(entry.data_base64),
+      );
+      if (firstBytes.length > 0) {
+        chunks.push(firstBytes);
+        totalBytes += firstBytes.length;
+      }
+      while (
+        queue.length > 0 &&
+        !queue[0].reset &&
+        totalBytes < COALESCE_MAX_BYTES
+      ) {
+        const next = queue.shift();
+        if (!next) continue;
+        const nextBytes = syncFilter.filter(
+          decodeBase64ToUint8Array(next.data_base64),
+        );
+        if (nextBytes.length > 0) {
+          chunks.push(nextBytes);
+          totalBytes += nextBytes.length;
+        }
+      }
+
+      if (totalBytes === 0) {
+        continue;
+      }
+
+      busy = true;
+      writeBytes(concatUint8Arrays(chunks, totalBytes), () => {
+        busy = false;
+        if (disposed) {
+          queue.length = 0;
+          return;
+        }
+        pump();
+      });
+      return;
+    }
   };
 
   return {
@@ -119,6 +171,7 @@ export function createTerminalWriteQueue(term) {
     dispose() {
       disposed = true;
       queue.length = 0;
+      syncFilter.reset();
     },
     get pending() {
       return queue.length;
@@ -474,16 +527,6 @@ export function Terminal({ id, heightKey, rows, cols, label }) {
   useEffect(() => {
     scheduleFit();
   }, [height, scheduleFit]);
-
-  useEffect(() => {
-    const shell = shellRef.current;
-    if (!shell || typeof ResizeObserver === "undefined") return undefined;
-    const observer = new ResizeObserver(() => {
-      scheduleFit();
-    });
-    observer.observe(shell);
-    return () => observer.disconnect();
-  }, [id, scheduleFit]);
 
   useEffect(() => {
     const applyTheme = () => {

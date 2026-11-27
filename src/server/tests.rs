@@ -15,9 +15,10 @@ use super::ws::{
     validate_events_websocket_request, web_socket_config,
 };
 use super::*;
-use crate::protocol::SessionPhase;
+use crate::protocol::{ClientLeaseState, SessionPhase};
 use crate::session::tests::{
-    test_host_with_poisoned_close_lock, with_test_host_holding_close_lock,
+    test_host_with_expired_client_lease, test_host_with_poisoned_close_lock,
+    with_test_host_holding_close_lock,
 };
 use std::io::Read as _;
 
@@ -1230,4 +1231,52 @@ fn uncertain_probe_error_is_retained_and_counts_as_alive() {
         ProbeOutcome::Dead
     ));
     assert!(!runtime_server_is_alive_for(&missing_name));
+}
+
+#[test]
+fn terminal_resize_does_not_refresh_expired_client_lease_while_terminal_input_does() {
+    use std::sync::atomic::Ordering;
+
+    let (host, lease) = test_host_with_expired_client_lease();
+    assert_eq!(
+        host.show("gbt-test").unwrap().client_state,
+        ClientLeaseState::Disconnected
+    );
+
+    // Passive / automatic read-only viewport sync must never resurrect an expired lease.
+    let resize = WebEventsClientCommand::TerminalResize {
+        id: "r1".to_owned(),
+        session: "gbt-test".to_owned(),
+        cols: 100,
+        rows: 30,
+    };
+    let _ = apply_web_events_client_command(&host, &resize);
+    assert_eq!(lease.load(Ordering::Acquire), 1_000);
+    assert_eq!(
+        host.show("gbt-test").unwrap().client_state,
+        ClientLeaseState::Disconnected
+    );
+
+    // Invalid base64 input rejects before refreshing the lease.
+    let bad_input = WebEventsClientCommand::TerminalInput {
+        id: "i-bad".to_owned(),
+        session: "gbt-test".to_owned(),
+        data_base64: "!!!".to_owned(),
+    };
+    assert!(apply_web_events_client_command(&host, &bad_input).is_err());
+    assert_eq!(lease.load(Ordering::Acquire), 1_000);
+
+    // Explicit valid interactive keyboard input refreshes the client lease before touching PTY.
+    let valid_input = WebEventsClientCommand::TerminalInput {
+        id: "i1".to_owned(),
+        session: "gbt-test".to_owned(),
+        data_base64: "YQ==".to_owned(),
+    };
+    // Test session has no backing PTY writer, so write_raw errors after refreshing lease.
+    let _ = apply_web_events_client_command(&host, &valid_input);
+    assert!(lease.load(Ordering::Acquire) > 1_000);
+    assert_eq!(
+        host.show("gbt-test").unwrap().client_state,
+        ClientLeaseState::Connected
+    );
 }

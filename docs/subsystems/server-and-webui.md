@@ -12,7 +12,7 @@
 ## 核心不变量
 
 1. **严格仅限 Loopback 与 Origin/Header 防护**：WebUI 不设账号登录，绝不允许绑定非 loopback 地址；关闭与 WebSocket 升级接口强制校验同源及 `X-Agent-Bridge-WebUI` 头，连接数采用无锁可移植 CAS（`compare_exchange_weak`）有界准入。
-2. **只读终端与租约续命**：WebUI 默认禁用键盘注入，开启后透传原始按键字节与 `resize`；存在活跃 WebSocket 订阅时保持宿主租约活跃。
+2. **只读终端与租约续命**：WebUI 默认禁用键盘注入，开启后透传原始按键字节与 `resize`；仅显式交互式输入（`terminal_input`）刷新宿主租约，只读态连接与自动视口 `terminal_resize` 均不刷新租约。
 3. **15 语言全量一致性**：修改 `webui/src/i18n/catalog/*.js` 须同步全部 15 个语种并通过 `i18n.test.jsx`；修改前端后必须重新运行 `npm run build` 更新 `webui/dist`。
 
 ## 验证命令

@@ -407,6 +407,42 @@ describe("Terminal (xterm read-only)", () => {
     queue.dispose();
   });
 
+  it("drops empty ?2026 synchronized output pairs and coalesces queued deltas", () => {
+    const term = new MockXTerm();
+    term.holdWriteCallbacks = true;
+    const queue = createTerminalWriteQueue(term);
+
+    // Pure empty ?2026 pair does not call term.write at all.
+    queue.enqueue({
+      reset: false,
+      data_base64: btoa("\x1b[?2026h\x1b[?2026l"),
+    });
+    expect(term.ops).toHaveLength(0);
+
+    // Non-empty first chunk starts write; consecutive queued deltas coalesce.
+    queue.enqueue({ reset: false, data_base64: btoa("first") });
+    queue.enqueue({
+      reset: false,
+      data_base64: btoa("\x1b[?2026h"),
+    });
+    queue.enqueue({
+      reset: false,
+      data_base64: btoa("\x1b[?2026lsecond"),
+    });
+    queue.enqueue({ reset: false, data_base64: btoa("-third") });
+
+    expect(term.ops).toHaveLength(1);
+    expect(decodeChunk(term.ops[0][1])).toBe("first");
+
+    term.flushWriteCallback();
+    expect(term.ops).toHaveLength(2);
+    expect(decodeChunk(term.ops[1][1])).toBe("second-third");
+
+    term.flushWriteCallback();
+    expect(term.pendingCallbacks).toHaveLength(0);
+    queue.dispose();
+  });
+
   it("dispose drops pending queue entries even if prior write callback later fires", async () => {
     await renderTerminal();
     const term = MockXTerm.instances[0];

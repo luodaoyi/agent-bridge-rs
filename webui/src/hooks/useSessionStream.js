@@ -290,6 +290,7 @@ export function useSessionStream({ setNotice } = {}) {
     let retryTimer = 0;
     let attempt = 0;
     let everConnected = false;
+    let lastUpdatedSecond = -1;
 
     const clearRetry = () => {
       if (retryTimer) {
@@ -312,7 +313,12 @@ export function useSessionStream({ setNotice } = {}) {
       reconcileTerminalSessions(
         new Set(message.sessions.map((session) => session.session)),
       );
-      setLastUpdated(new Date());
+      const nowMs = Date.now();
+      const currentSecond = Math.floor(nowMs / 1000);
+      if (currentSecond !== lastUpdatedSecond) {
+        lastUpdatedSecond = currentSecond;
+        setLastUpdated(new Date(nowMs));
+      }
       clearStreamError();
     };
 

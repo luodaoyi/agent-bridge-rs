@@ -19,6 +19,7 @@ import {
   remainingLabel,
   sessionGroupKey,
   sessionStats,
+  sessionsSignature,
 } from "./sessions.js";
 
 describe("activityOf", () => {
@@ -227,5 +228,49 @@ describe("lifecycle hint model", () => {
     expect(
       lifecycleCollapsedSummary({ client_state: "connected" }, t, "en"),
     ).toBeNull();
+  });
+});
+
+describe("sessionsSignature", () => {
+  it("ignores timestamp churn but tracks error and exit_code", () => {
+    const base = {
+      session: "gbt-1",
+      worker: "codex",
+      client_kind: "agy",
+      owner: "AGY",
+      client_session_id: "c1",
+      client_state: "connected",
+      client_lease_ms: 120000,
+      orphan_grace_ms: 600000,
+      client_last_seen_at_ms: 100,
+      orphaned_at_ms: null,
+      auto_close_at_ms: null,
+      phase: "running",
+      exit_code: null,
+      error: null,
+      title: "Codex",
+      cwd: "D:\\repo",
+      model: null,
+      sandbox: null,
+      dangerously_bypass: false,
+      process_id: 42,
+      updated_at_ms: 100,
+      activity: "working",
+      hook_event: null,
+      hook_at_ms: 0,
+      tool_name: null,
+      waiting_reason: null,
+      rows: 36,
+      cols: 120,
+    };
+
+    const sig1 = sessionsSignature([base]);
+    const sigNoise = sessionsSignature([
+      { ...base, updated_at_ms: 99999, client_last_seen_at_ms: 88888 },
+    ]);
+    expect(sigNoise).toBe(sig1);
+
+    expect(sessionsSignature([{ ...base, error: "boom" }])).not.toBe(sig1);
+    expect(sessionsSignature([{ ...base, exit_code: 1 }])).not.toBe(sig1);
   });
 });

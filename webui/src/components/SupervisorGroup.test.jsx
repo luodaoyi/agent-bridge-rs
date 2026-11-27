@@ -1,4 +1,4 @@
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../i18n/index.js";
@@ -384,6 +384,53 @@ describe("SupervisorGroup session tabs", () => {
     await act(async () => summary.click());
     expect(onToggle).toHaveBeenCalledOnce();
     expect(onToggle).toHaveBeenCalledWith(true);
+  });
+
+  it("prevents native details toggle bounce so controlled open toggles cleanly", async () => {
+    function Controlled() {
+      const [collapsed, setCollapsed] = useState(false);
+      return (
+        <I18nProvider initialLocale="en">
+          <SupervisorGroup
+            groupKey="client:thread-tabs"
+            owner="Codex Tab Owner"
+            clientSessionId="thread-tabs"
+            sessions={multiSessions}
+            collapsed={collapsed}
+            collapsedSessions={new Set()}
+            onToggle={(nextOpen) => setCollapsed(!nextOpen)}
+            onToggleSession={() => {}}
+            onCloseGroup={() => {}}
+            onCloseSession={() => {}}
+            busy={false}
+          />
+        </I18nProvider>
+      );
+    }
+
+    await act(async () => {
+      root.render(<Controlled />);
+    });
+    const details = container.querySelector("details.group");
+    const summary = details.querySelector("summary");
+    expect(details.open).toBe(true);
+
+    let defaultPrevented = false;
+    const onBodyClick = (event) => {
+      defaultPrevented = event.defaultPrevented;
+    };
+    document.body.addEventListener("click", onBodyClick, false);
+
+    try {
+      await act(async () => summary.click());
+      expect(defaultPrevented).toBe(true);
+      expect(details.open).toBe(false);
+
+      await act(async () => summary.click());
+      expect(details.open).toBe(true);
+    } finally {
+      document.body.removeEventListener("click", onBodyClick, false);
+    }
   });
 
   it("syncs terminal height across sessions in the same supervisor group", async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { memo, useEffect, useId, useRef, useState } from "react";
 import { ChevronRight, Network, Trash2 } from "lucide-react";
 import { useI18n } from "../i18n/index.js";
 import {
@@ -27,7 +27,7 @@ function workerLabel(worker) {
   return null;
 }
 
-export function SupervisorGroup({
+export const SupervisorGroup = memo(function SupervisorGroup({
   groupKey,
   owner,
   clientSessionId,
@@ -124,7 +124,10 @@ export function SupervisorGroup({
     >
       <summary
         className="card-header supervisor-summary"
-        onClick={() => onToggle(collapsed)}
+        onClick={(event) => {
+          event.preventDefault();
+          onToggle(collapsed);
+        }}
       >
         <ChevronRight
           aria-hidden="true"
@@ -262,4 +265,4 @@ export function SupervisorGroup({
       </div>
     </details>
   );
-}
+});

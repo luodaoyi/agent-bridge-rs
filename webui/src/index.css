@@ -200,7 +200,6 @@ summary::-webkit-details-marker {
 .header-actions,
 .stream-meta,
 .supervisor-labels,
-.subagent-title-row,
 .update-banner,
 .btn-list {
   display: flex;
@@ -459,10 +458,20 @@ summary::-webkit-details-marker {
 }
 
 .subagent-title-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 0.45rem;
+  min-width: 0;
+}
+
+.subagent-title-row > .subheader,
+.subagent-title-row > .badge {
+  flex: 0 0 auto;
 }
 
 .subagent-title {
+  flex: 1 1 auto;
   font-size: 0.875rem;
   font-weight: 600;
 }

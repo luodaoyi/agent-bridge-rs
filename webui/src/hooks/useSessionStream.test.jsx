@@ -677,4 +677,32 @@ describe("useSessionStream", () => {
     await act(async () => second.open());
     expect(latest.unconfirmedInputs).toBe(0);
   });
+
+  it("throttles lastUpdated updates to once per wall-clock second", async () => {
+    vi.setSystemTime(new Date("2026-11-27T10:00:00.100Z"));
+    await mount();
+    const ws = MockWebSocket.instances[0];
+    await act(async () => ws.open());
+
+    await act(async () => {
+      ws.emitMessage({ type: "sessions", sessions: [], terminals: [] });
+    });
+    const firstUpdated = latest.lastUpdated;
+    expect(firstUpdated).toBeInstanceOf(Date);
+
+    // Same wall-clock second: reference remains unchanged.
+    vi.setSystemTime(new Date("2026-11-27T10:00:00.900Z"));
+    await act(async () => {
+      ws.emitMessage({ type: "sessions", sessions: [], terminals: [] });
+    });
+    expect(latest.lastUpdated).toBe(firstUpdated);
+
+    // Next second: lastUpdated advances cleanly.
+    vi.setSystemTime(new Date("2026-11-27T10:00:01.050Z"));
+    await act(async () => {
+      ws.emitMessage({ type: "sessions", sessions: [], terminals: [] });
+    });
+    expect(latest.lastUpdated).not.toBe(firstUpdated);
+    expect(latest.lastUpdated.getTime()).toBe(Date.now());
+  });
 });

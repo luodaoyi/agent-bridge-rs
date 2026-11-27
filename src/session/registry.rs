@@ -230,12 +230,10 @@ impl SessionHost {
         Ok(())
     }
 
-    /// Refresh every managed session's client lease in response to an inbound
-    /// WebUI command. The WebUI's global event stream itself never refreshes
-    /// leases — only inbound terminal commands (and Codex keepalives via
-    /// touch_client) prove the client is attached right now, so each inbound
-    /// command cancels any provisional orphan cleanup before the PTY is
-    /// touched.
+    /// Refresh every managed session's client lease in response to explicit
+    /// interactive WebUI input (`terminal_input`). Passive WebUI subscriptions and
+    /// automatic read-only `terminal_resize` viewport syncs must NOT refresh leases,
+    /// so disconnected supervisors do not flash online/offline when viewing tabs.
     pub(crate) fn touch_web_clients(&self) -> Result<usize> {
         self.touch_web_clients_at(now_millis())
     }

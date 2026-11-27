@@ -2,11 +2,23 @@ use super::*;
 
 impl Session {
     pub(super) fn state(&self) -> Result<SessionState> {
+        self.state_with_screen(true)
+    }
+
+    pub(super) fn state_without_screen(&self) -> Result<SessionState> {
+        self.state_with_screen(false)
+    }
+
+    fn state_with_screen(&self, include_screen: bool) -> Result<SessionState> {
         let inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("session state lock was poisoned"))?;
-        Ok(inner.to_state(now_millis(), self.cleanup_claimed.load(Ordering::Acquire)))
+        Ok(inner.to_state_with_screen(
+            now_millis(),
+            self.cleanup_claimed.load(Ordering::Acquire),
+            include_screen,
+        ))
     }
 
     /// Next pure time-based client lease transition for this session, if any.
@@ -22,9 +34,27 @@ impl Session {
 }
 
 impl SessionInner {
+    #[cfg(test)]
     pub(super) fn to_state(&self, now: u64, cleanup_claimed: bool) -> SessionState {
+        self.to_state_with_screen(now, cleanup_claimed, true)
+    }
+
+    pub(super) fn to_state_with_screen(
+        &self,
+        now: u64,
+        cleanup_claimed: bool,
+        include_screen: bool,
+    ) -> SessionState {
         let screen = self.parser.screen();
         let (rows, cols) = screen.size();
+        let (screen_text, screen_ansi_base64) = if include_screen {
+            (
+                Some(screen.contents()),
+                BASE64.encode(screen.contents_formatted()),
+            )
+        } else {
+            (None, String::new())
+        };
         let (client_state, client_last_seen_at_ms, orphaned_at_ms, auto_close_at_ms) =
             self.client_lifecycle(now, cleanup_claimed);
         SessionState {
@@ -57,10 +87,10 @@ impl SessionInner {
             exit_code: self.exit_code,
             error: self.error.clone(),
             title: self.title.clone(),
-            screen: Some(screen.contents()),
+            screen: screen_text,
             rows,
             cols,
-            screen_ansi_base64: BASE64.encode(screen.contents_formatted()),
+            screen_ansi_base64,
             last_cursor: self.next_cursor,
             last_output_at_ms: self.last_output_at_ms,
             activity: projected_activity(self.phase, self.hook.activity),
