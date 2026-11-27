@@ -12,8 +12,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+pub(crate) mod http_fallback;
+
 use crate::{
-    protocol::{HookEvent, HookEventKind, Request, WorkerKind},
+    protocol::{HookEvent, HookEventKind, Request, ResponseEnvelope, ResponseResult, WorkerKind},
     transport,
 };
 
@@ -158,14 +160,45 @@ pub(crate) fn run_ingress_fail_open(worker: WorkerKind) {
         return;
     };
 
-    let _ = transport::call_anonymous(
-        Request::HookEvent {
-            worker,
-            provider_session_id,
-            event,
-        },
-        false,
+    let _ = deliver_hook_event_with(
+        worker,
+        provider_session_id,
+        event,
+        hook_endpoint_file_path_opt().as_deref(),
+        |request| transport::call_anonymous(request, false),
     );
+}
+
+fn hook_endpoint_file_path_opt() -> Option<PathBuf> {
+    http_fallback::hook_endpoint_file_path().ok()
+}
+
+fn deliver_hook_event_with<F>(
+    worker: WorkerKind,
+    provider_session_id: String,
+    event: HookEvent,
+    endpoint_file: Option<&Path>,
+    ipc_call: F,
+) -> bool
+where
+    F: FnOnce(Request) -> Result<ResponseEnvelope>,
+{
+    let request = Request::HookEvent {
+        worker,
+        provider_session_id: provider_session_id.clone(),
+        event: event.clone(),
+    };
+    if let Ok(response) = ipc_call(request)
+        && response.ok
+        && matches!(response.result, Some(ResponseResult::Accepted { .. }))
+    {
+        return true;
+    }
+    let Some(endpoint_path) = endpoint_file else {
+        return false;
+    };
+    http_fallback::send_via_loopback_http_from(endpoint_path, worker, &provider_session_id, &event)
+        .is_ok()
 }
 
 pub(crate) fn install_target(target: HooksTarget) -> Result<HooksCommandStatus> {
@@ -1314,5 +1347,97 @@ mod tests {
         .unwrap();
         assert!(!status.installed);
         assert!(status.events_found < status.events_expected);
+    }
+
+    #[test]
+    fn loopback_hook_url_parser_accepts_only_loopback_literal_ip_and_exact_route() {
+        assert!(http_fallback::parse_loopback_hook_url("http://127.0.0.1:47654/api/hooks").is_ok());
+        assert!(http_fallback::parse_loopback_hook_url("http://[::1]:47654/api/hooks").is_ok());
+        for bad in [
+            "https://127.0.0.1:47654/api/hooks",
+            "http://localhost:47654/api/hooks",
+            "http://192.168.1.20:47654/api/hooks",
+            "http://127.0.0.1:47654/api/sessions",
+            "http://127.0.0.1:47654/api/hooks?extra=1",
+        ] {
+            assert!(
+                http_fallback::parse_loopback_hook_url(bad).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn deliver_hook_event_falls_back_to_loopback_http_when_ipc_fails() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint_path = dir.path().join("hook-endpoint.json");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let record = http_fallback::HookEndpointState {
+            url: format!("http://{addr}/api/hooks"),
+            token: "0123456789abcdef0123456789abcdef".to_owned(),
+            pid: std::process::id(),
+        };
+        fs::write(&endpoint_path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut raw = String::new();
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                raw.push_str(&line);
+                if let Some(val) = line
+                    .strip_prefix("Content-Length:")
+                    .or_else(|| line.strip_prefix("content-length:"))
+                {
+                    content_length = val.trim().parse::<usize>().unwrap();
+                }
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0_u8; content_length];
+            reader.read_exact(&mut body).unwrap();
+            raw.push_str(&String::from_utf8_lossy(&body));
+            let inner = reader.into_inner();
+            inner
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{\"accepted\":true}",
+                )
+                .unwrap();
+            inner.flush().unwrap();
+            raw
+        });
+
+        let event = HookEvent {
+            kind: HookEventKind::Stop,
+            cwd: Some(dir.path().display().to_string()),
+            tool_name: None,
+            message: None,
+            notification_type: None,
+            level: None,
+        };
+        let delivered = deliver_hook_event_with(
+            WorkerKind::Codex,
+            "01234567-89ab-4def-8123-456789abcdef".to_owned(),
+            event,
+            Some(&endpoint_path),
+            |_| bail!("ipc unavailable"),
+        );
+        assert!(delivered);
+        let received = server.join().unwrap();
+        assert!(received.starts_with("POST /api/hooks HTTP/1.1\r\n"));
+        assert!(received.contains("X-Agent-Bridge-Hook-Token: 0123456789abcdef0123456789abcdef"));
+        assert!(received.contains("\"worker\":\"codex\""));
+        assert!(received.contains("\"kind\":\"stop\""));
     }
 }

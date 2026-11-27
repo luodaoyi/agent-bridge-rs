@@ -1,5 +1,5 @@
 use super::process::*;
-use super::registry::SessionRegistry;
+use super::registry::{HookDiagnosticsTracker, SessionRegistry};
 use super::web_events::*;
 use super::*;
 use std::fs;
@@ -312,6 +312,7 @@ fn test_host_with_session(
             grace_ms: 600_000,
         },
         revision,
+        hook_diagnostics: HookDiagnosticsTracker::default(),
     };
     (host, session)
 }
@@ -364,6 +365,7 @@ fn windows_process_host(root_pid: u32, job: WindowsJob) -> SessionHost {
             grace_ms: 600_000,
         },
         revision,
+        hook_diagnostics: HookDiagnosticsTracker::default(),
     }
 }
 
@@ -396,6 +398,7 @@ fn unix_process_host(pgid: u32) -> SessionHost {
             grace_ms: 600_000,
         },
         revision,
+        hook_diagnostics: HookDiagnosticsTracker::default(),
     }
 }
 
@@ -433,6 +436,7 @@ fn unix_process_hosts(pgids: &[u32]) -> SessionHost {
             grace_ms: 600_000,
         },
         revision,
+        hook_diagnostics: HookDiagnosticsTracker::default(),
     }
 }
 
@@ -1961,6 +1965,7 @@ fn codex_session_start_hook_binds_external_provider_session_by_cwd() {
             grace_ms: 600_000,
         },
         revision,
+        hook_diagnostics: HookDiagnosticsTracker::default(),
     };
 
     let mut start = hook_event(HookEventKind::SessionStart);
@@ -1989,6 +1994,72 @@ fn codex_session_start_hook_binds_external_provider_session_by_cwd() {
         .unwrap()
     );
     assert_eq!(session.state().unwrap().phase, SessionPhase::Running);
+}
+
+#[test]
+fn codex_non_session_start_stop_hook_binds_unbound_session_by_cwd() {
+    let revision = Arc::new(HostRevision::new());
+    let mut session = test_session_with_revision(SessionPhase::Running, Arc::clone(&revision));
+    session.inner.get_mut().unwrap().worker = WorkerKind::Codex;
+    let session_cwd = session.inner.get_mut().unwrap().cwd.clone();
+    let session = Arc::new(session);
+    let host = SessionHost {
+        registry: Mutex::new(SessionRegistry {
+            accepting: true,
+            sessions: HashMap::from([("gbt-codex-stop".to_owned(), Arc::clone(&session))]),
+            provider_sessions: HashMap::new(),
+            external_bound_handles: HashSet::new(),
+            clients: HashMap::new(),
+            closed: HashMap::new(),
+        }),
+        next_id: AtomicU64::new(1),
+        orphan_policy: OrphanPolicy {
+            lease_ms: 120_000,
+            grace_ms: 600_000,
+        },
+        revision,
+        hook_diagnostics: HookDiagnosticsTracker::default(),
+    };
+
+    // Missed SessionStart: PreToolUse with matching cwd binds and moves to Working.
+    let mut pre = hook_event(HookEventKind::PreToolUse);
+    pre.cwd = Some(session_cwd.clone());
+    pre.tool_name = Some("exec".to_owned());
+    assert!(
+        host.apply_hook_event(WorkerKind::Codex, TEST_PROVIDER_SESSION_ID, pre)
+            .unwrap()
+    );
+
+    // Subsequent Stop transitions Codex to Idle/Done cleanly.
+    let mut stop = hook_event(HookEventKind::Stop);
+    stop.cwd = Some(session_cwd.clone());
+    assert!(
+        host.apply_hook_event(WorkerKind::Codex, TEST_PROVIDER_SESSION_ID, stop)
+            .unwrap()
+    );
+    let state = session.state().unwrap();
+    assert_eq!(state.phase, SessionPhase::Idle);
+    assert_eq!(state.activity, HookActivity::Done);
+    assert_eq!(state.hook_event, Some(HookEventKind::Stop));
+
+    // A second unrelated Codex provider_session_id without an unbound session is unmatched
+    // and must NOT steal the already-bound session.
+    let mut stray = hook_event(HookEventKind::Stop);
+    stray.cwd = Some(session_cwd);
+    assert!(
+        !host
+            .apply_hook_event(
+                WorkerKind::Codex,
+                "99999999-9999-4999-8999-999999999999",
+                stray,
+            )
+            .unwrap()
+    );
+    let diag = host.hook_diagnostics();
+    assert_eq!(diag.accepted_count, 2);
+    assert_eq!(diag.unmatched_count, 1);
+    assert_eq!(diag.last_unmatched_worker, Some(WorkerKind::Codex));
+    assert_eq!(diag.last_unmatched_event, Some(HookEventKind::Stop));
 }
 
 #[test]

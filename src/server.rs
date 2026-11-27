@@ -1,3 +1,4 @@
+mod hook_http;
 mod http;
 #[cfg(test)]
 mod tests;
@@ -150,6 +151,20 @@ pub(crate) fn run() -> Result<()> {
     drop(startup_lock);
 
     let web_listener = bind_web_ui()?;
+    let hook_token = hook_http::generate_hook_token()?;
+    let _hook_endpoint_guard = if let Some(ref listener) = web_listener
+        && let Ok(address) = listener.local_addr()
+    {
+        match hook_http::HookEndpointGuard::publish(address, &hook_token) {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                eprintln!("agent-bridge server: hook HTTP endpoint unavailable: {error:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let web_url = web_listener
         .as_ref()
         .and_then(|listener| listener.local_addr().ok())
@@ -159,6 +174,7 @@ pub(crate) fn run() -> Result<()> {
         started_at_ms: now_millis(),
         stopping: AtomicBool::new(false),
         web_url,
+        hook_token,
         version_checker: Arc::new(VersionChecker::new()),
         web_connections: AtomicUsize::new(0),
         ipc_connections: AtomicUsize::new(0),
@@ -373,6 +389,7 @@ struct RuntimeState {
     started_at_ms: u64,
     stopping: AtomicBool,
     web_url: Option<String>,
+    hook_token: String,
     version_checker: Arc<VersionChecker>,
     /// Active WebUI HTTP/WebSocket handler threads.
     web_connections: AtomicUsize,
@@ -632,6 +649,7 @@ impl RuntimeState {
             active_sessions: self.host.active_count(),
             web_url: self.web_url.clone(),
             stopping: self.stopping.load(Ordering::Acquire),
+            hook_diagnostics: Some(self.host.hook_diagnostics()),
         }
     }
 }
