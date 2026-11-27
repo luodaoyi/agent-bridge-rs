@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.2 - 2026-11-27
+
 - Added authenticated loopback HTTP hook fallback (`POST /api/hooks` with `X-Agent-Bridge-Hook-Token` and owner-only `hook-endpoint.json`) when `__hook` IPC delivery fails across isolated environments (Issue #41).
 - Added canonical `cwd`-based lazy session binding for non-`SessionStart` hook events, exposed hook diagnostics in `ServerInfo`, and added Codex `0.172+` hook-review trust prompt (`codex-hook-trust`) and `Ready` / Braille-spinner idle title detection (Issue #35, Issue #41).
 - Modularized all oversized production source modules under `src/` and `scripts/` into cohesive `<= 600`-line submodules while preserving CLI, IPC, and WebUI contracts.

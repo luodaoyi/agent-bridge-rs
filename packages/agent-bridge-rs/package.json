@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge-rs",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "A local runtime server and CLI bridge for Codex and Grok Build subagents",
   "license": "MIT",
   "publishConfig": {
@@ -18,12 +18,12 @@
     "LICENSE"
   ],
   "optionalDependencies": {
-    "@asural/agent-bridge-win32-x64": "0.9.1",
-    "@asural/agent-bridge-win32-arm64": "0.9.1",
-    "@asural/agent-bridge-linux-x64": "0.9.1",
-    "@asural/agent-bridge-linux-arm64": "0.9.1",
-    "@asural/agent-bridge-darwin-x64": "0.9.1",
-    "@asural/agent-bridge-darwin-arm64": "0.9.1"
+    "@asural/agent-bridge-win32-x64": "0.9.2",
+    "@asural/agent-bridge-win32-arm64": "0.9.2",
+    "@asural/agent-bridge-linux-x64": "0.9.2",
+    "@asural/agent-bridge-linux-arm64": "0.9.2",
+    "@asural/agent-bridge-darwin-x64": "0.9.2",
+    "@asural/agent-bridge-darwin-arm64": "0.9.2"
   },
   "repository": {
     "type": "git",
