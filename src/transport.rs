@@ -15,6 +15,8 @@ mod platform;
 #[cfg(test)]
 mod tests;
 
+#[cfg(windows)]
+pub(crate) use platform::preferred_default_desktop_wide;
 pub(crate) use platform::runtime_name;
 use platform::start_detached_server;
 #[cfg(unix)]

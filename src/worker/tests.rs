@@ -238,3 +238,63 @@ fn detects_codex_0172_hook_review_prompt_and_ready_or_spinner_titles() {
         Some(SessionPhase::Running)
     );
 }
+
+#[test]
+fn detects_no_daemon_support_from_codex_help_and_injects_flag_for_codex_only() {
+    let modern_help = "Options:\n      --no-alt-screen\n      --no-daemon  Run without the shared background server\n";
+    let legacy_help = "Options:\n      --no-alt-screen\n";
+    assert!(codex_help_supports_no_daemon(modern_help));
+    assert!(!codex_help_supports_no_daemon(legacy_help));
+
+    let codex_cmd = build_worker_command_with_options(
+        WorkerKind::Codex,
+        &OsString::from("codex"),
+        Path::new("/tmp/repo"),
+        None,
+        None,
+        true,
+        None,
+        false,
+        "01234567-89ab-4def-8123-456789abcdef",
+        None,
+        true,
+    );
+    let codex_argv = codex_cmd
+        .get_argv()
+        .iter()
+        .map(|item| item.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        codex_argv,
+        vec![
+            "codex",
+            "--no-daemon",
+            "-C",
+            "/tmp/repo",
+            "-s",
+            "workspace-write",
+            "-a",
+            "never",
+        ]
+    );
+
+    let grok_cmd = build_worker_command_with_options(
+        WorkerKind::Grok,
+        &OsString::from("grok"),
+        Path::new("/tmp/repo"),
+        None,
+        None,
+        true,
+        None,
+        false,
+        "01234567-89ab-4def-8123-456789abcdef",
+        None,
+        true,
+    );
+    let grok_argv = grok_cmd
+        .get_argv()
+        .iter()
+        .map(|item| item.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(!grok_argv.contains(&"--no-daemon".to_owned()));
+}

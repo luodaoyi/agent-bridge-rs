@@ -7,12 +7,16 @@ use anyhow::{Context, Result};
 use interprocess::local_socket::GenericFilePath;
 use interprocess::local_socket::{GenericNamespaced, Name, prelude::*};
 
+#[cfg(windows)]
+mod desktop;
 #[cfg(unix)]
 mod runtime_dir;
 mod spawn;
 #[cfg(unix)]
 mod unix_socket;
 
+#[cfg(windows)]
+pub(crate) use desktop::preferred_default_desktop_wide;
 #[cfg(unix)]
 pub(crate) use runtime_dir::{runtime_dir, runtime_socket_path};
 pub(super) use spawn::start_detached_server;
