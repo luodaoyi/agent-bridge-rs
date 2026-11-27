@@ -6,7 +6,7 @@ use interprocess::local_socket::{GenericNamespaced, ListenerOptions};
 #[cfg(unix)]
 use std::{
     ffi::OsString,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 /// A unique throwaway temp directory, removed on drop. Tests must never leave
