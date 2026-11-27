@@ -1156,6 +1156,265 @@ fn client_heartbeat_cancels_claim_before_input_is_accepted() {
     assert_eq!(session.state().unwrap().phase, SessionPhase::Running);
 }
 
+fn writer_test_session(
+    worker: WorkerKind,
+) -> Result<(Arc<Session>, std::sync::mpsc::Receiver<WriterItem>)> {
+    let mut session = test_session(SessionPhase::Idle);
+    session
+        .inner
+        .get_mut()
+        .map_err(|_| anyhow::anyhow!("test lock poisoned"))?
+        .worker = worker;
+    let (writer_tx, writer_rx) = sync_channel(8);
+    *session
+        .writer_tx
+        .get_mut()
+        .map_err(|_| anyhow::anyhow!("test lock poisoned"))? = Some(writer_tx);
+    Ok((Arc::new(session), writer_rx))
+}
+
+#[test]
+fn codex_send_separates_paste_from_submit() -> Result<()> {
+    let (session, writer_rx) = writer_test_session(WorkerKind::Codex)?;
+    session.send("next task\n第二行".to_owned())?;
+    let item = writer_rx.recv()?;
+    assert_eq!(
+        item.data,
+        b"\x1b[200~next task\n\xe7\xac\xac\xe4\xba\x8c\xe8\xa1\x8c\x1b[201~"
+    );
+    assert_eq!(
+        item.followup,
+        Some((CODEX_PASTE_SUBMIT_DELAY, b"\r".to_vec()))
+    );
+    assert_eq!(item.budget, item.data.len() + 1);
+    assert_eq!(
+        session.pending_writer_bytes.load(Ordering::Acquire),
+        item.budget
+    );
+    assert!(matches!(
+        writer_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    Ok(())
+}
+
+#[test]
+fn codex_send_admits_paste_and_submit_budget_together() -> Result<()> {
+    let (session, writer_rx) = writer_test_session(WorkerKind::Codex)?;
+    let input = "next task";
+    let budget = input.len() + 13;
+    let occupied = WRITER_QUEUE_MAX_BYTES - budget + 1;
+    session
+        .pending_writer_bytes
+        .store(occupied, Ordering::Release);
+    assert!(session.send(input.to_owned()).is_err());
+    assert_eq!(
+        session.pending_writer_bytes.load(Ordering::Acquire),
+        occupied
+    );
+    assert!(matches!(
+        writer_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+
+    session
+        .pending_writer_bytes
+        .store(occupied - 1, Ordering::Release);
+    session.send(input.to_owned())?;
+    assert_eq!(writer_rx.recv()?.budget, budget);
+    assert_eq!(
+        session.pending_writer_bytes.load(Ordering::Acquire),
+        WRITER_QUEUE_MAX_BYTES
+    );
+
+    let (session, writer_rx) = writer_test_session(WorkerKind::Codex)?;
+    for _ in 0..8 {
+        session.send(input.to_owned())?;
+    }
+    assert!(session.send(input.to_owned()).is_err());
+    assert_eq!(
+        session.pending_writer_bytes.load(Ordering::Acquire),
+        8 * budget
+    );
+    drop(writer_rx);
+    assert!(session.send(input.to_owned()).is_err());
+    assert_eq!(
+        session.pending_writer_bytes.load(Ordering::Acquire),
+        8 * budget
+    );
+    Ok(())
+}
+
+#[test]
+fn controls_raw_writes_and_grok_send_have_no_followup() -> Result<()> {
+    for worker in [WorkerKind::Codex, WorkerKind::Grok] {
+        let (session, writer_rx) = writer_test_session(worker)?;
+        for input in ["\x03", "\r", "\n", "\x1b", "\x7f"] {
+            session.send(input.to_owned())?;
+            let item = writer_rx.recv()?;
+            assert_eq!(item.data, input.as_bytes());
+            assert_eq!(item.followup, None);
+            assert_eq!(item.budget, input.len());
+        }
+        let raw = b"\x1b[200~raw\x1b[201~\r";
+        session.write_raw(raw.to_vec())?;
+        let item = writer_rx.recv()?;
+        assert_eq!(item.data, raw);
+        assert_eq!(item.followup, None);
+        assert_eq!(item.budget, raw.len());
+        if worker == WorkerKind::Grok {
+            session.send("next task".to_owned())?;
+            let item = writer_rx.recv()?;
+            assert_eq!(item.data, b"\x1b[200~next task\x1b[201~\r");
+            assert_eq!(item.followup, None);
+            assert_eq!(item.budget, item.data.len());
+        }
+    }
+    Ok(())
+}
+
+struct RecordingWriter {
+    events: std::sync::mpsc::Sender<(Vec<u8>, Instant)>,
+    fail_on_operation: Option<usize>,
+    operations: usize,
+}
+
+impl RecordingWriter {
+    fn record(&mut self, data: Vec<u8>) -> std::io::Result<()> {
+        self.operations += 1;
+        self.events
+            .send((data, Instant::now()))
+            .map_err(std::io::Error::other)?;
+        if self.fail_on_operation == Some(self.operations) {
+            return Err(std::io::Error::other("injected writer failure"));
+        }
+        Ok(())
+    }
+}
+
+impl Write for RecordingWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.record(data.to_vec())?;
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.record(Vec::new())
+    }
+}
+
+#[test]
+fn codex_writer_flushes_paste_then_delayed_submit_without_interleaving() -> Result<()> {
+    let (session, writer_rx) = writer_test_session(WorkerKind::Codex)?;
+    session.send("next task".to_owned())?;
+    session.write_raw(b"tail".to_vec())?;
+    session.queue_terminal_response(b"\x1b[0n".to_vec());
+    session.close_writer();
+    let (events_tx, events_rx) = channel();
+    spawn_writer(
+        Arc::clone(&session),
+        Box::new(RecordingWriter {
+            events: events_tx,
+            fail_on_operation: None,
+            operations: 0,
+        }),
+        writer_rx,
+    );
+
+    let (paste, _) = events_rx.recv_timeout(Duration::from_secs(5))?;
+    assert_eq!(paste, b"\x1b[200~next task\x1b[201~");
+    let (flush, flushed_at) = events_rx.recv_timeout(Duration::from_secs(5))?;
+    assert!(flush.is_empty());
+    let (submit, submitted_at) = events_rx.recv_timeout(Duration::from_secs(5))?;
+    assert_eq!(submit, b"\r");
+    assert!(submitted_at.duration_since(flushed_at) >= CODEX_PASTE_SUBMIT_DELAY);
+    for expected in [b"".as_slice(), b"tail", b"", b"\x1b[0n", b""] {
+        assert_eq!(events_rx.recv_timeout(Duration::from_secs(5))?.0, expected);
+    }
+    assert_eq!(
+        events_rx.recv_timeout(Duration::from_secs(5)),
+        Err(RecvTimeoutError::Disconnected)
+    );
+    assert_eq!(session.pending_writer_bytes.load(Ordering::Acquire), 0);
+    assert!(session.state()?.error.is_none());
+    Ok(())
+}
+
+#[test]
+fn writer_shutdown_cancels_followup_and_releases_all_pending_bytes() -> Result<()> {
+    let (session, writer_rx) = writer_test_session(WorkerKind::Codex)?;
+    // A longer delay makes cancellation distinguishable from waiting out the timer.
+    session.enqueue_input(
+        b"paste".to_vec(),
+        Some((Duration::from_secs(5), b"\r".to_vec())),
+        true,
+    )?;
+    session.write_raw(b"tail".to_vec())?;
+    session.queue_terminal_response(b"\x1b[0n".to_vec());
+    let (events_tx, events_rx) = channel();
+    spawn_writer(
+        Arc::clone(&session),
+        Box::new(RecordingWriter {
+            events: events_tx,
+            fail_on_operation: None,
+            operations: 0,
+        }),
+        writer_rx,
+    );
+    assert_eq!(events_rx.recv_timeout(Duration::from_secs(5))?.0, b"paste");
+    assert!(events_rx.recv_timeout(Duration::from_secs(5))?.0.is_empty());
+    assert_eq!(session.pending_writer_bytes.load(Ordering::Acquire), 10);
+    session.shutdown.store(true, Ordering::Release);
+    assert_eq!(
+        events_rx.recv_timeout(Duration::from_secs(1)),
+        Err(RecvTimeoutError::Disconnected)
+    );
+    assert_eq!(session.pending_writer_bytes.load(Ordering::Acquire), 0);
+    assert!(session.state()?.error.is_none());
+    Ok(())
+}
+
+#[test]
+fn writer_errors_release_paste_followup_and_queued_budgets() -> Result<()> {
+    // Fail each write/flush, including both operations after the delay.
+    for fail_on_operation in 1..=4 {
+        let (session, writer_rx) = writer_test_session(WorkerKind::Codex)?;
+        session.send("next task".to_owned())?;
+        session.write_raw(b"tail".to_vec())?;
+        session.queue_terminal_response(b"\x1b[0n".to_vec());
+        session
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("test lock poisoned"))?
+            .process_done = true;
+        let (events_tx, events_rx) = channel();
+        spawn_writer(
+            Arc::clone(&session),
+            Box::new(RecordingWriter {
+                events: events_tx,
+                fail_on_operation: Some(fail_on_operation),
+                operations: 0,
+            }),
+            writer_rx,
+        );
+        for _ in 0..fail_on_operation {
+            events_rx.recv_timeout(Duration::from_secs(5))?;
+        }
+        assert_eq!(
+            events_rx.recv_timeout(Duration::from_secs(5)),
+            Err(RecvTimeoutError::Disconnected)
+        );
+        assert_eq!(session.pending_writer_bytes.load(Ordering::Acquire), 0);
+        assert!(
+            session
+                .state()?
+                .error
+                .is_some_and(|error| error.contains("injected writer failure"))
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn writer_admission_rejects_whole_input_once_byte_budget_is_full() {
     let session = test_session(SessionPhase::Idle);
@@ -1819,6 +2078,7 @@ fn ctrl_c_send_preserves_bytes_and_does_not_start_or_finish_a_turn() {
     full_tx
         .try_send(WriterItem {
             data: vec![b'x'],
+            followup: None,
             budget: 1,
         })
         .unwrap();
@@ -1864,6 +2124,7 @@ fn raw_write_passes_ctrl_c_through_without_starting_a_turn() {
     full_tx
         .try_send(WriterItem {
             data: vec![b'x'],
+            followup: None,
             budget: 1,
         })
         .unwrap();

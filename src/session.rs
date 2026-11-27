@@ -60,6 +60,7 @@ const SCROLLBACK_ROWS: usize = 5_000;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 const MAX_READ_BYTES: usize = 64 * 1024;
 const WRITER_QUEUE_CAPACITY: usize = 64;
+const CODEX_PASTE_SUBMIT_DELAY: Duration = Duration::from_millis(200);
 /// Total pending writer bytes budget (≈ four maximum-size writes). Admission is
 /// bounded by both entry count and bytes so a full queue always rejects the
 /// whole input instead of accepting a partial write.
@@ -118,13 +119,14 @@ struct LaunchConfig {
 }
 
 /// One item handed to the writer thread. `budget` is the number of admission
-/// bytes this item holds: input enqueues carry their exact payload length,
+/// bytes this item holds: inputs count both the payload and optional followup,
 /// while terminal response frames (never admitted, sent directly) carry zero.
 /// The writer releases exactly `budget` bytes after writing, so the byte
 /// counter can never go negative for a response that was never counted.
 #[derive(Debug, PartialEq)]
 struct WriterItem {
     data: Vec<u8>,
+    followup: Option<(Duration, Vec<u8>)>,
     budget: usize,
 }
 
