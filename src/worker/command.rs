@@ -204,6 +204,7 @@ pub(crate) fn strip_parent_host_env_current_process() {
     }
 }
 
+#[cfg(any(windows, test))]
 pub(crate) fn codex_help_supports_no_daemon(help_output: &str) -> bool {
     help_output
         .split_whitespace()
